@@ -559,7 +559,8 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_KEYDOWN:
-            if (wp==VK_ESCAPE && g.activities.view()==lynx::View::Expanded) {
+            if (g.activities.view()==lynx::View::Expanded &&
+                (wp==VK_ESCAPE || wp==VK_RETURN || wp==VK_SPACE)) {
                 setExpanded(false);
                 return 0;
             }
