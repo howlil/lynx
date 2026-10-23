@@ -151,6 +151,10 @@ void syncAccessibleState() {
     state.visible=g.activities.view()!=lynx::View::Hidden && IsWindowVisible(g.hwnd);
     state.expanded=state.visible && g.activities.view()==lynx::View::Expanded;
     const auto selected=g.activities.primary();
+    if(selected) {
+        state.ownerId=selected->id;
+        state.ownerGeneration=selected->generation;
+    }
     state.name=L"LYNX Island";
     if(state.expanded)state.name+=L", expanded";
     if(selected)state.name+=L", "+selected->title;
@@ -910,14 +914,20 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case kUiInvokeMessage:
             toggleExpanded();
             return 0;
-        case kUiActionMessage:
-            invokeContextAction(static_cast<lynx::ShellAction>(wp));
+        case kUiActionMessage: {
+            const auto current=g.activities.primary();
+            if(current && current->generation==static_cast<std::uint64_t>(lp))
+                invokeContextAction(static_cast<lynx::ShellAction>(wp));
             return 0;
+        }
         case kUiFocusMessage:
             if(g.activities.view()==lynx::View::Expanded) {
                 const auto actions=currentActions();
                 const int requested=static_cast<int>(wp);
-                if(requested==-1 || (requested>=0 && requested<actions.count)) {
+                const auto current=g.activities.primary();
+                if((requested==-1 ||
+                    (current && current->generation==static_cast<std::uint64_t>(lp))) &&
+                   (requested==-1 || (requested>=0 && requested<actions.count))) {
                     g.focusedAction=requested;
                     SetForegroundWindow(hwnd); // only explicit UIA focus request
                     SetFocus(hwnd);
