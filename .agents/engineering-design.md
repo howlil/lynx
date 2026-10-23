@@ -279,3 +279,20 @@ Do not create empty ADR files merely to signal progress; record an actual decisi
 - Apple HIG Live Activities: https://developer.apple.com/design/human-interface-guidelines/live-activities
 
 **Verified so far:** v3 browser mock exercises visual/interaction concepts. **Not verified:** C++ compile, native Windows compositor, transparent input, OS providers, performance, screen reader support or fullscreen reliability. Do not report these as completed.
+
+
+## M2 implementation record — real Windows providers (24 October 2026)
+
+**Status:** coded, compiled and core-tested in stacked draft PR #3; manual native Windows acceptance is still open. This note does not change ADR-001: GDI+ layered HWND remains a feasibility spike, not the final compositor decision.
+
+**Current path:** `WindowsMediaProvider (GSMTC / C++/WinRT worker MTA)` → immutable `MediaSnapshot` message → `MediaActivityBridge` (portable lifecycle reducer) → `ActivityCoordinator` → existing shell. Event handlers merely enqueue refresh work to a worker; no direct renderer mutation or continuous media polling. The provider unsubscribes, joins the worker and drains owned snapshot messages at shutdown. Missing/unsupported media sessions degrade to Ambient.
+
+**Presentation:** supported Now Playing title/artist, playing/paused status, priority 30, source switching and disconnect/reconnect. The Expanded surface and tray expose Play/Pause only when Windows reports that the current session permits it. Artwork, seek, skip and user-selected source routing remain out of scope.
+
+**Power:** `RegisterPowerSettingNotification` for `GUID_ACDC_POWER_SOURCE` and `GUID_BATTERY_PERCENTAGE_REMAINING`; the cached status is read on startup and meaningful changes, rather than once per animation frame. A charging transition may generate a passive transient without stealing focus.
+
+**Preferences:** `HKCU\Software\LYNX` stores validated DWORDs for placement and reduced-motion override. A missing override follows the OS animation preference.
+
+**Evidence:** Windows x64 compile/CTest and portable Linux tests passed at `7402df0d` in GitHub Actions run 40034238982. Tests cover source switching, playback status, disappearing/reappearing sessions and coordinator prioritization. **Not verified**: live GSMTC access/permission on the user's device, player compatibility, actual Play/Pause, charging event visual UX, persistence on reboot, Windows UI Automation details and idle CPU/GPU resource budget. GSMTC documentation declares the `globalMediaControl` capability; packaging/identity/permissions may need follow-up based on the observed HRESULT.
+
+**Handoff:** before finishing M2 or merging, test the downloadable Windows executable with an actual media player, inspect fallback/error handling, then run the existing DPI/focus/performance acceptance matrix. No new service, cloud backend or native extension system is justified by this integration.
