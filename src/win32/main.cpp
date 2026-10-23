@@ -671,6 +671,29 @@ void reconcileFullscreen() {
     refresh();
 }
 
+void invokeContextAction(lynx::ShellAction kind) {
+    const auto actions=currentActions();
+    bool supported=false;
+    for(int i=0;i<actions.count;i++) {
+        if(actions.items[i].action==kind){supported=true;break;}
+    }
+    if(!supported)return; // client or queued event may refer to an old action
+    switch(kind) {
+        case lynx::ShellAction::MediaToggle:
+            if(g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
+                g.mediaProvider->togglePlayPause();
+            break;
+        case lynx::ShellAction::FocusToggle: toggleFocus();break;
+        case lynx::ShellAction::FocusReset: resetFocus();break;
+        case lynx::ShellAction::FileReveal: revealFirstFile();break;
+        case lynx::ShellAction::FileClear:
+            g.shelf.clear();
+            g.shelf.reconcile(g.activities);
+            refresh();
+            break;
+        default:break;
+    }
+}
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
@@ -857,43 +880,21 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
         case WM_LBUTTONUP: {
-            const auto selected=g.activities.primary();
-            if (g.activities.view()==lynx::View::Expanded &&
-                selected && selected->id==lynx::MediaActivityBridge::kId &&
-                g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
+            if(g.activities.view()==lynx::View::Expanded) {
+                const auto actions=currentActions();
                 const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
                 const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
-                const float contentX=2.0f;
-                const float contentY=g.offset.value();
-                const float width=g.width.value();
-                if (px>=contentX+width-85.0f && px<=contentX+width-22.0f &&
-                    py>=contentY+125.0f && py<=contentY+156.0f) {
-                    if (g.mediaProvider) g.mediaProvider->togglePlayPause();
-                    return 0;
-                }
-            }
-            if(g.activities.view()==lynx::View::Expanded && selected) {
-                const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
-                const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
-                const float w=g.width.value(),y=g.offset.value();
-                if(py>=y+125.0f && py<=y+156.0f) {
-                    if(selected->id==lynx::FocusTimer::kId) {
-                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
-                            toggleFocus();return 0;
-                        }
-                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
-                            resetFocus();return 0;
-                        }
-                    }
-                    if(selected->id==lynx::FileShelf::kId) {
-                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
-                            revealFirstFile();return 0;
-                        }
-                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
-                            g.shelf.clear();
-                            g.shelf.reconcile(g.activities);
-                            refresh();return 0;
-                        }
+                for(int index=0;index<actions.count;index++) {
+                    const float left=2.0f+g.width.value()-
+                        (actions.count==1?85.0f:index==0?168.0f:88.0f);
+                    const float width=actions.count==1?63.0f:index==0?72.0f:66.0f;
+                    if(px>=left && px<left+width &&
+                       py>=g.offset.value()+125.0f &&
+                       py<g.offset.value()+156.0f) {
+                        g.focusedAction=index;
+                        invokeContextAction(actions.items[index].action);
+                        syncAccessibleState();
+                        return 0;
                     }
                 }
             }
@@ -908,6 +909,21 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case kUiInvokeMessage:
             toggleExpanded();
+            return 0;
+        case kUiActionMessage:
+            invokeContextAction(static_cast<lynx::ShellAction>(wp));
+            return 0;
+        case kUiFocusMessage:
+            if(g.activities.view()==lynx::View::Expanded) {
+                const auto actions=currentActions();
+                const int requested=static_cast<int>(wp);
+                if(requested==-1 || (requested>=0 && requested<actions.count)) {
+                    g.focusedAction=requested;
+                    SetForegroundWindow(hwnd); // only explicit UIA focus request
+                    SetFocus(hwnd);
+                    refresh();
+                }
+            }
             return 0;
         case kVolumeMessage: {
             if(!g.volume)return 0;
@@ -970,23 +986,29 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_KEYDOWN:
-            if (g.activities.view()==lynx::View::Expanded) {
-                if (wp==VK_SPACE) {
-                    const auto selected=g.activities.primary();
-                    if(selected && selected->id==lynx::FocusTimer::kId) {
-                        toggleFocus();return 0;
-                    }
-                    if(selected && selected->id==lynx::FileShelf::kId) {
-                        revealFirstFile();return 0;
-                    }
-                    if (selected && selected->id==lynx::MediaActivityBridge::kId &&
-                        g.mediaSnapshot.available && g.mediaSnapshot.canToggle &&
-                        g.mediaProvider) {
-                        g.mediaProvider->togglePlayPause();
+            if(g.activities.view()==lynx::View::Expanded) {
+                if(wp==VK_ESCAPE) {
+                    setExpanded(false);
+                    return 0;
+                }
+                const auto actions=currentActions();
+                if(wp==VK_TAB && actions.count>0) {
+                    const bool reverse=(GetKeyState(VK_SHIFT)&0x8000)!=0;
+                    g.focusedAction=reverse ?
+                        (g.focusedAction<0?actions.count-1:
+                         (g.focusedAction+actions.count-1)%actions.count) :
+                        (g.focusedAction+1)%actions.count;
+                    refresh();
+                    return 0;
+                }
+                if((wp==VK_RETURN || wp==VK_SPACE) && actions.count>0) {
+                    const int selected=g.focusedAction<0?0:g.focusedAction;
+                    if(auto action=actions.at(selected)) {
+                        invokeContextAction(action->action);
                         return 0;
                     }
                 }
-                if (wp==VK_ESCAPE || wp==VK_RETURN || wp==VK_SPACE) {
+                if(wp==VK_RETURN && actions.count==0) {
                     setExpanded(false);
                     return 0;
                 }
