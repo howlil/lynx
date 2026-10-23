@@ -145,6 +145,41 @@ void updateDpiForMonitor() {
 }
 float scale() { return static_cast<float>(g.dpi) / 96.0f; }
 
+void syncAccessibleState() {
+    if(!g.uiaProvider)return;
+    lynx::AccessibleSnapshot state;
+    state.visible=g.activities.view()!=lynx::View::Hidden && IsWindowVisible(g.hwnd);
+    state.expanded=state.visible && g.activities.view()==lynx::View::Expanded;
+    const auto selected=g.activities.primary();
+    state.name=L"LYNX Island";
+    if(state.expanded)state.name+=L", expanded";
+    if(selected)state.name+=L", "+selected->title;
+    if(g.activities.view()==lynx::View::Transient)
+        state.name+=L", "+g.activities.transientText();
+    GetWindowRect(g.hwnd,&state.screen);
+    const auto items=currentActions();
+    state.count=state.expanded?items.count:0;
+    state.focused=g.focusedAction;
+    const float ratio=scale();
+    const float origin=2.0f;
+    const float w=g.width.value();
+    const float y=g.offset.value()+125.0f;
+    for(int index=0;index<state.count;index++) {
+        const auto action=items.at(index);
+        if(!action)continue;
+        const float left=origin+w-(state.count==1?85.0f:
+                                          index==0?168.0f:88.0f);
+        const float width=state.count==1?63.0f:index==0?72.0f:66.0f;
+        const int x=state.screen.left+static_cast<int>(std::lround(left*ratio));
+        const int yy=state.screen.top+static_cast<int>(std::lround(y*ratio));
+        const int xx=state.screen.left+static_cast<int>(std::lround((left+width)*ratio));
+        const int bottom=state.screen.top+static_cast<int>(std::lround((y+31.0f)*ratio));
+        state.actions[index]={action->action,std::wstring(action->name),
+                              RECT{x,yy,xx,bottom}};
+    }
+    g.uiaProvider->update(std::move(state));
+}
+
 void readPower() {
     SYSTEM_POWER_STATUS current{};
     if (GetSystemPowerStatus(&current)) {
@@ -417,6 +452,18 @@ bool drawFrame() {
                     if(!selected)
                         label(graphics,L"Drop files here · Right-click for actions",11,
                               x+23,y+120,Color(255,140,140,148));
+                    const auto actions=currentActions();
+                    if(g.focusedAction>=0 && g.focusedAction<actions.count) {
+                        const float buttonX=x+w-(actions.count==1?85.0f:
+                            g.focusedAction==0?168.0f:88.0f);
+                        const float buttonW=actions.count==1?63.0f:
+                            g.focusedAction==0?72.0f:66.0f;
+                        GraphicsPath focusContour;
+                        rounded(focusContour,buttonX-2.0f,y+123.0f,
+                                buttonW+4.0f,35.0f,14.0f);
+                        Pen focusStroke(Color(255,10,132,255),1.8f);
+                        graphics.DrawPath(&focusStroke,&focusContour);
+                    }
                     label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
                           x+23,y+153,Color(255,115,115,122));
                 }
@@ -468,6 +515,7 @@ bool drawFrame() {
     if (updated) {
         g.firstFrame = false;
         timing.success();
+        syncAccessibleState();
     }
 
     SelectObject(memory,old);
@@ -477,9 +525,14 @@ bool drawFrame() {
     return updated != FALSE;
 }
 
-void refresh() { setTargets(); drawFrame(); }
+void refresh() {
+    setTargets();
+    drawFrame();
+    syncAccessibleState(); // Hidden has no draw, but must disappear from UIA tree.
+}
 
 void setExpanded(bool wantExpanded) {
+    g.focusedAction=-1;
     if (wantExpanded) {
         g.priorFocus = GetForegroundWindow();
         g.activities.expand();
