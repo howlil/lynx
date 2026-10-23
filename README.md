@@ -4,6 +4,43 @@ A native Windows 11 Dynamic Island utility, starting with a **core feasibility e
 
 **Current status: M0 experiment, not a completed application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
 
+## M2 — Windows providers (real media + persistent settings)
+
+Branch: \`feat/m2-windows-providers\` (stacked on M1, then M0). **This is the first OS-integration slice, not a final product release.**
+
+### Implemented in this branch
+
+- **Windows media sessions:** a C++/WinRT GlobalSystemMediaTransportControlsSessionManager (GSMTC) provider subscribes to CurrentSessionChanged, SessionsChanged, PlaybackInfoChanged and MediaPropertiesChanged. The dedicated MTA worker posts owned immutable snapshots into the Win32 window queue. No media polling/render loop.
+- **Core media boundary:** a portable MediaActivityBridge reconciles media title, artist, playing/paused state, source switches, and disconnect/reconnect with ActivityCoordinator. Priority 30 puts real media ahead of the mock activities; it remains pinned when the user has expanded it.
+- **Media actions:** Expanded Island has a context-sensitive Play/Pause surface. In Expanded, Space controls a supported session; the right-click tray menu also exposes Play/Pause. Disabled when Windows or the source app does not support the toggle.
+- **Power notification subscriptions:** Windows power source and battery percent changes are observed through RegisterPowerSettingNotification; the battery snapshot is read on startup and meaningful changes rather than each animation frame. Charging can surface a passive transient.
+- **Settings persistence:** save Floating/Top-attached and Reduced Motion into validated DWORDs under \`HKCU\Software\LYNX\`. Preferences reload at next startup and use system Reduced Motion when no explicit override exists.
+- **Cleanup:** revoke WinRT event handlers, join the media worker, and drain queued media messages before tearing down the HWND.
+
+### Smoke test on a real Windows 11 desktop
+
+1. End the old \`lynx_m0.exe\` instance (single-instance mutex); download the \`lynx-native-windows-x64\` artifact from the latest successful M2 CI build and launch the extracted executable.
+2. Right-click tray/Island, select **Top-attached**, then **Reduced motion**. Exit and relaunch; the preferences should persist.
+3. Play a song in a supported app (e.g., Spotify or a browser player exposing Windows system media controls). The Island should transition from Ambient to Compact with the **real title** and display a subtitle in Expanded. Changing tracks should update it. Stopping/disconnecting that session should restore Ambient.
+4. In Expanded, click **Play/Pause**, or press **Space** while the Island has focus. The button/menu must be absent or disabled if the media source does not expose that control.
+5. While music is playing, create the simulated focus timer from the menu. Confirm the Activity Coordinator still handles both activities, and that an ordinary charging event does not take over an Expanded interaction.
+6. Unplug/replug charging power and change battery percentage. Confirm the displayed percentage is valid and the transient does not steal focus. On a battery-less PC, show AC or omit the battery percentage; do not fabricate 0%.
+7. Change placement and Reduced Motion, quit via tray, reopen, and verify settings persisted. On corruption/invalid registry values, fallback to documented defaults.
+8. Check Task Manager CPU and working set after 5–10 minutes of stable idle and with media active. **No performance result has been measured from CI alone.**
+
+### Known constraints / risks
+
+- **GSMTC** depends on Windows support, a participating media app/session, and the \`globalMediaControl\` capability. The unpackaged Win32 build may need additional packaging/manifest decisions on some systems. If access fails, the provider falls back without crashing the shell. Inspect \`%TEMP%\lynx-m0.log\` and UI state.
+- Windows system media source selection is the OS current session, **not** a custom multi-player picker yet.
+- Media artwork/seek/skip, native timer engine, tray icon branding, rich keyboard/screen-reader accessibility, and robust fullscreen detection are separate future slices.
+- The CPU-drawn layered-window spike remains in place; the final compositor and resource budget are **not yet approved**.
+
+### Technical references
+
+- Microsoft GSMTC API: https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmanager
+- Microsoft Win32 + C++/WinRT: https://learn.microsoft.com/en-us/windows/apps/develop/cpp-winrt/get-started
+- Microsoft power notifications: https://learn.microsoft.com/en-us/windows/win32/power/registering-for-power-events
+
 ## M1 — Island activity core (stacked implementation)
 
 Branch: \`feat/m1-activity-core\` (based on \`feat/m0-native-shell\`).
