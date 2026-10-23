@@ -1,8 +1,9 @@
 #include "../core/island_core.hpp"
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>
+#include <objidl.h>
+#include <oleauto.h>
 #include <shellapi.h>
 #include <gdiplus.h>
 #include <algorithm>
