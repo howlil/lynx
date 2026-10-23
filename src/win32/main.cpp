@@ -682,9 +682,10 @@ void reconcileFullscreen() {
             }
         }
     }
-    if(fullscreen==g.actualFullscreen)return;
+    const bool desiredHidden=g.hiddenByDemo || fullscreen;
+    if(fullscreen==g.actualFullscreen &&
+       g.activities.fullscreen()==desiredHidden)return;
     g.actualFullscreen=fullscreen;
-    const bool desiredHidden=g.hiddenByDemo || g.actualFullscreen;
     if(desiredHidden && g.activities.expanded()) {
         // The foreground application already owns focus. Do not call
         // SetForegroundWindow during this automatic hide.
@@ -824,6 +825,7 @@ void menu(HWND hwnd) {
         g.priorFocus=nullptr;
     }
     refresh();
+    PostMessageW(hwnd,kForegroundMessage,0,0); // reconcile after menu focus is restored
 }
 
 void addTray(HWND hwnd) {
@@ -1047,6 +1049,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             drawFrame();
             return 0;
         case WM_POWERBROADCAST:
+            if(wp==PBT_APMRESUMEAUTOMATIC || wp==PBT_APMRESUMESUSPEND) {
+                // Monotonic deadlines include sleep: reconcile immediately,
+                // not after the next one-second WM_TIMER.
+                timerFocusTick();
+                PostMessageW(hwnd,kForegroundMessage,0,0);
+            }
             if (wp==PBT_POWERSETTINGCHANGE || wp==PBT_APMPOWERSTATUSCHANGE ||
                 wp==PBT_APMRESUMEAUTOMATIC || wp==PBT_APMRESUMESUSPEND) {
                 // Cache hardware data once per change, never once per animation frame.
