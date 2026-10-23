@@ -1,0 +1,23 @@
+name: M0 Native Build
+on:
+  push:
+    branches: [master, "feat/m0-native-shell"]
+  pull_request:
+jobs:
+  windows-build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Compile
+        run: cmake --build build --config Release --parallel
+      - name: Core tests
+        run: ctest --test-dir build -C Release --output-on-failure
+  portable-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
