@@ -619,9 +619,12 @@ void menu(HWND hwnd) {
     AppendMenuW(popup, MF_STRING | (g.placement==lynx::Placement::Attached?MF_CHECKED:0),
                 kAttached,L"Top-attached");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+#ifdef _DEBUG
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING,kAmbient,L"Clear simulated activities");
-    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Start / update simulated media");
-    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Simulate focus activity (legacy)");
+    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Simulated media");
+    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Simulated focus");
+#endif
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING,kFocus25,L"Start Focus · 25 min");
     AppendMenuW(popup,MF_STRING,kFocus5,L"Start Focus · 5 min");
@@ -641,13 +644,15 @@ void menu(HWND hwnd) {
                 ((g.mediaSnapshot.available && g.mediaSnapshot.canToggle)?MF_ENABLED:MF_GRAYED),
                 kToggleMedia,g.mediaSnapshot.playing?
                   L"Pause current Windows media":L"Play current Windows media");
+#ifdef _DEBUG
     AppendMenuW(popup,MF_STRING,kTransientDemo,L"Simulate transient charging");
-    AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
-                kReducedMotion,L"Reduced motion");
     AppendMenuW(popup,MF_STRING,kFullscreenDemo,
                 g.hiddenByDemo?L"Restore from hidden":L"Simulate fullscreen hide");
+#endif
+    AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
+                kReducedMotion,L"Reduced motion");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
-    AppendMenuW(popup,MF_STRING,kQuit,L"Quit LYNX M0");
+    AppendMenuW(popup,MF_STRING,kQuit,L"Quit LYNX");
     HWND beforeMenuFocus = GetForegroundWindow();
     POINT pt{};
     GetCursorPos(&pt);
@@ -730,7 +735,7 @@ void addTray(HWND hwnd) {
     nid.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;
     nid.uCallbackMessage=kTrayMessage;
     nid.hIcon=LoadIconW(nullptr,IDI_APPLICATION);
-    wcscpy_s(nid.szTip,L"LYNX M0 · Ctrl+Alt+Space");
+    wcscpy_s(nid.szTip,L"LYNX · Ctrl+Alt+Space");
     Shell_NotifyIconW(NIM_ADD,&nid);
 }
 void removeTray(HWND hwnd) {
