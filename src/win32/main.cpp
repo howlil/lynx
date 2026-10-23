@@ -1,4 +1,8 @@
 #include "../core/media_activity.hpp"
+#include "../core/focus_timer.hpp"
+#include "../core/file_shelf.hpp"
+#include "volume_feedback.hpp"
+#include "file_drop_target.hpp"
 #include "media_provider.hpp"
 #include "settings_store.hpp"
 
@@ -7,6 +11,7 @@
 #include <objidl.h>
 #include <oleauto.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <UIAutomation.h>
@@ -28,9 +33,11 @@ namespace {
 constexpr UINT_PTR kAnimationTimer = 101;
 constexpr UINT_PTR kClockTimer = 102;
 constexpr UINT_PTR kTransientTimer = 103;
+constexpr UINT_PTR kFocusTimer = 104;
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kMediaMessage = WM_APP + 3;
+constexpr UINT kVolumeMessage = WM_APP + 4;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
 constexpr float kCanvasWidthDip = 440.0f;
@@ -38,7 +45,8 @@ constexpr float kCanvasHeightDip = 260.0f;
 
 enum MenuId : UINT {
     kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
-    kTimerDemo, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit
+    kTimerDemo, kFocus5, kFocus25, kFocusPause, kFocusReset,
+    kShelfOpen, kShelfClear, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit
 };
 
 struct App {
@@ -50,6 +58,13 @@ struct App {
     bool reduced = false;
     std::uint64_t demoRevision = 0;
     std::uint64_t timerRevision = 0;
+    lynx::FocusTimer focus;
+    lynx::FileShelf shelf;
+    lynx::FileDropTarget* dropTarget = nullptr;
+    bool dropRegistered = false;
+    std::unique_ptr<lynx::WindowsVolumeFeedback> volume;
+    lynx::WindowsVolumeFeedback::Status volumeState{};
+    bool volumeInitialized = false;
     std::uint64_t transientToken = 0;
     ULONGLONG transientDeadline = 0;
     bool hiddenByDemo = false;
@@ -210,6 +225,37 @@ void onMediaSnapshot(lynx::MediaSnapshot next) {
     g.mediaBridge.reconcile(g.activities,lynx::MediaObservation{
         next.available,next.playing,next.source,next.title,next.artist});
     g.mediaSnapshot=std::move(next);
+}
+
+void showTransient(const std::wstring& text,UINT duration=2600) {
+    g.transientToken=g.activities.transient(text);
+    if(!g.transientToken)return;
+    g.transientDeadline=GetTickCount64()+duration;
+    SetTimer(g.hwnd,kTransientTimer,duration,nullptr);
+}
+
+void timerFocusTick() {
+    const auto now=GetTickCount64();
+    if(g.focus.state()!=lynx::FocusTimer::State::Running) {
+        KillTimer(g.hwnd,kFocusTimer);
+        return;
+    }
+    if(g.focus.advance(now)) {
+        KillTimer(g.hwnd,kFocusTimer);
+        g.focus.publish(g.activities,now);
+        showTransient(L"Focus complete",3600);
+        refresh(); // forward declaration added below
+        return;
+    }
+    const auto selected=g.activities.primary();
+    const int remaining=g.focus.remainingSeconds(now);
+    const auto newTitle=lynx::FocusTimer::clock(remaining);
+    // Do not repaint the entire window for multiple timer callbacks per second.
+    if(!selected || selected->id!=lynx::FocusTimer::kId ||
+        selected->title!=newTitle || g.activities.expanded()) {
+        g.focus.publish(g.activities,now);
+        refresh();
+    }
 }
 
 void timerAtMinuteBoundary() {
