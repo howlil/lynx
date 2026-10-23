@@ -26,7 +26,7 @@ constexpr float kCanvasWidthDip = 440.0f;
 constexpr float kCanvasHeightDip = 260.0f;
 
 enum MenuId : UINT {
-    kFloating = 2001, kAttached, kAmbient, kMediaDemo,
+    kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
     kTransientDemo, kReducedMotion, kFullscreenDemo, kQuit
 };
 
@@ -332,6 +332,8 @@ void toggleExpanded() { setExpanded(g.presentation.view() != lynx::View::Expande
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
+    AppendMenuW(popup, MF_STRING, kShowHere, L"Show Island on this monitor");
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(popup, MF_STRING | (g.placement==lynx::Placement::Floating?MF_CHECKED:0),
                 kFloating,L"Floating");
     AppendMenuW(popup, MF_STRING | (g.placement==lynx::Placement::Attached?MF_CHECKED:0),
@@ -355,6 +357,13 @@ void menu(HWND hwnd) {
     DestroyMenu(popup);
     PostMessageW(hwnd,WM_NULL,0,0);
     switch (command) {
+        case kShowHere:
+            if (g.presentation.fullscreen()) g.presentation.setFullscreen(false);
+            g.hiddenByDemo = false;
+            g.chosenMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+            if (g.presentation.view() == lynx::View::Hidden) g.presentation.ambient();
+            diagnostic("show-on-this-monitor");
+            break;
         case kFloating: g.placement=lynx::Placement::Floating; break;
         case kAttached: g.placement=lynx::Placement::Attached; break;
         case kAmbient: g.demoMedia=false; g.presentation.ambient(); break;
