@@ -179,5 +179,23 @@ int main() {
         assert(shelf.add(L"/sample/"+std::to_wstring(i)));
     assert(!shelf.add(L"/sample/overflow"));
 
+    // User-chosen shelf must stay selected even when timer/media has higher priority.
+    ActivityCoordinator combined;
+    FocusTimer selectedFocus;
+    selectedFocus.start(300,3000);
+    assert(selectedFocus.publish(combined,3000));
+    FileShelf selectedShelf;
+    assert(selectedShelf.add(L"/inbox/notes.txt"));
+    assert(selectedShelf.reconcile(combined));
+    assert(combined.primary()->id==FocusTimer::kId);
+    assert(combined.select(FileShelf::kId));
+    assert(combined.view()==View::Expanded);
+    assert(combined.primary()->id==FileShelf::kId);
+    assert(!combined.select(99999));
+    assert(combined.primary()->id==FileShelf::kId);
+    assert(combined.transient(L"Muted")==0);
+    combined.collapse();
+    assert(combined.primary()->id==FocusTimer::kId);
+
     std::cout << "lynx core: geometry, lifecycle, media, timer and shelf PASS\n";
 }
