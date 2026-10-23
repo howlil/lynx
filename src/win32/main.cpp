@@ -13,6 +13,7 @@
 #include <oleauto.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shellscalingapi.h>
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <UIAutomation.h>
@@ -77,6 +78,7 @@ struct App {
     int dpi = 96;
     ULONGLONG previousFrame = 0;
     HMONITOR chosenMonitor = nullptr;
+    HMONITOR dpiMonitor = nullptr;
     bool firstFrame = true;
     IRawElementProviderSimple* uiaProvider = nullptr;
     std::unique_ptr<lynx::WindowsMediaProvider> mediaProvider;
@@ -212,6 +214,19 @@ void diagnostic(const char* operation, DWORD error = 0,
     CloseHandle(file);
 }
 
+void updateDpiForMonitor() {
+    if(g.chosenMonitor == g.dpiMonitor)return;
+    g.dpiMonitor=g.chosenMonitor;
+    UINT x=96,y=96;
+    if(g.chosenMonitor &&
+       SUCCEEDED(GetDpiForMonitor(g.chosenMonitor,MDT_EFFECTIVE_DPI,&x,&y)) &&
+       x>0) {
+        g.dpi=static_cast<int>(x);
+    } else {
+        g.dpi=g.hwnd ? static_cast<int>(GetDpiForWindow(g.hwnd)) : 96;
+        if(g.dpi<=0)g.dpi=96;
+    }
+}
 float scale() { return static_cast<float>(g.dpi) / 96.0f; }
 
 void readPower() {
@@ -346,6 +361,7 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
 
 bool drawFrame() {
     if (g.activities.view() == lynx::View::Hidden) return true;
+    updateDpiForMonitor();
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
     const float canvasWidthDip = std::ceil(g.width.value()) + 4.0f;
@@ -738,6 +754,7 @@ void menu(HWND hwnd) {
             if (g.activities.fullscreen()) g.activities.setFullscreen(false);
             g.hiddenByDemo = false;
             g.chosenMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+            g.dpiMonitor=nullptr; // DPI must follow the destination display
             // Manual recovery retargets the overlay to an existing monitor;
             // fullscreen policy is still applied for its current foreground.
             diagnostic("show-on-this-monitor");
@@ -1054,14 +1071,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             break;
         case WM_DISPLAYCHANGE:
             reconcileMonitor();
+            g.dpiMonitor=nullptr;
             reconcileFullscreen();
-            g.dpi=static_cast<int>(GetDpiForWindow(hwnd));
-            if(g.dpi<=0)g.dpi=96;
             drawFrame();
             return 0;
         case WM_DPICHANGED:
-            g.dpi=static_cast<int>(GetDpiForWindow(hwnd));
-            if(g.dpi<=0)g.dpi=96;
+            g.dpiMonitor=nullptr;
             drawFrame();
             return 0;
         case kForegroundMessage:
