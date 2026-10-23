@@ -1015,8 +1015,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         if (singleton) CloseHandle(singleton);
         return instanceError == ERROR_ALREADY_EXISTS ? 0 : 5;
     }
+    // OLE drag/drop is a UI-STA facility. Do not initialize this thread as MTA.
+    const HRESULT oleResult=OleInitialize(nullptr);
+    const bool oleReady=SUCCEEDED(oleResult);
     GdiplusStartupInput startup{};
     if (GdiplusStartup(&g.gdiplus,&startup,nullptr)!=Ok) {
+        if(oleReady)OleUninitialize();
         CloseHandle(singleton); return 1;
     }
     WNDCLASSEXW wc{sizeof(wc)};
@@ -1024,13 +1028,17 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     wc.lpszClassName=L"LYNX_M0_NATIVE_OVERLAY";
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     if (!RegisterClassExW(&wc)) {
-        GdiplusShutdown(g.gdiplus); CloseHandle(singleton); return 2;
+        GdiplusShutdown(g.gdiplus);
+        if(oleReady)OleUninitialize();
+        CloseHandle(singleton); return 2;
     }
     HWND hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_LAYERED|WS_EX_NOACTIVATE,
          wc.lpszClassName,L"LYNX M0",WS_POPUP,0,0,440,260,
          nullptr,nullptr,instance,nullptr);
     if (!hwnd) {
-        GdiplusShutdown(g.gdiplus); CloseHandle(singleton); return 3;
+        GdiplusShutdown(g.gdiplus);
+        if(oleReady)OleUninitialize();
+        CloseHandle(singleton); return 3;
     }
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -1043,6 +1051,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
             L"LYNX M0 — Overlay initialization failed", MB_OK | MB_ICONERROR | MB_TOPMOST);
         DestroyWindow(hwnd);
         GdiplusShutdown(g.gdiplus);
+        if(oleReady)OleUninitialize();
         CloseHandle(singleton);
         return 4;
     }
@@ -1050,6 +1059,34 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     diagnostic("startup overlay shown");
+    if(oleReady) {
+        g.dropTarget=new (std::nothrow) lynx::FileDropTarget(
+            [hwnd](std::vector<std::wstring> paths) {
+                bool added=false;
+                for(const auto& path:paths) {
+                    const DWORD attrs=GetFileAttributesW(path.c_str());
+                    if(attrs!=INVALID_FILE_ATTRIBUTES)
+                        added=g.shelf.add(path) || added;
+                }
+                if(added) {
+                    g.shelf.reconcile(g.activities);
+                    showTransient(L"File added",1800);
+                    refresh();
+                }
+            });
+        if(g.dropTarget) {
+            const HRESULT registered=RegisterDragDrop(hwnd,g.dropTarget);
+            g.dropRegistered=SUCCEEDED(registered);
+            if(!g.dropRegistered)diagnostic("RegisterDragDrop failed",
+                static_cast<DWORD>(registered));
+        }
+        g.volume=std::make_unique<lynx::WindowsVolumeFeedback>(
+            hwnd,kVolumeMessage);
+        g.volumeState=g.volume->read();
+        g.volumeInitialized=g.volumeState.available;
+    } else {
+        diagnostic("OleInitialize failed",static_cast<DWORD>(oleResult));
+    }
     g.mediaProvider=std::make_unique<lynx::WindowsMediaProvider>(
         [hwnd](lynx::MediaSnapshot snapshot) {
             auto message=std::make_unique<lynx::MediaSnapshot>(std::move(snapshot));
@@ -1063,6 +1100,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         DispatchMessageW(&msg);
     }
     GdiplusShutdown(g.gdiplus);
+    if(oleReady)OleUninitialize();
     CloseHandle(singleton);
     return static_cast<int>(msg.wParam);
 }
