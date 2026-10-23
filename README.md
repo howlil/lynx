@@ -2,7 +2,49 @@
 
 A native Windows 11 Dynamic Island utility, starting with a **core feasibility experiment**.
 
-**Current status: M3 general-user utilities, stacked on M2/M1/M0. Not a completed/released application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
+**Current status: M4-B renderer evidence and accessibility, stacked on M4-A and merged M0–M3. Not a completed/released application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
+
+## M4-B — Renderer baseline and accessibility
+
+Branch: feat/m4b-render-accessibility (stacked on M4-A; not production signoff).
+
+### Accessible contextual actions
+
+- Replaces single-button UIA with a fragment root and action buttons for Media Play/Pause, Focus Pause/Resume/Reset and File Shelf Reveal/Clear.
+- The context-actions contract is shared by mouse, keyboard and UI Automation. Child fragments have names, runtime identities, bounding rectangles, parent/sibling navigation, focus and Invoke.
+- While Expanded: Tab/Shift+Tab chooses an action; Enter/Space invokes; Escape collapses. A visible blue outline follows keyboard focus.
+- UIA requests post to the HWND owner, which re-checks the currently active activity and its generation to avoid executing a stale command.
+- Required native tests: Inspect, Accessibility Insights, Narrator, tab order, focus events and actual action bounds at multiple DPI scales. Compilation is not screen-reader acceptance.
+
+### Opt-in renderer CPU baseline
+
+The current implementation still uses a GDI+ per-pixel-alpha layered window. Set the environment variable LYNX_RENDER_METRICS=1 before launching LYNX, run a representative workload, and **quit normally through the system tray**. Upon quit, the UI thread exports:
+
+    %TEMP%\lynx-render-metrics.csv
+
+Measured data: draw calls, failed draws, mean and recent p95 QPC wall time, max draw time, bounded recent sample count. Render instrumentation buffers samples in memory and does not write every frame.
+
+PowerShell:
+
+    $env:LYNX_RENDER_METRICS = "1"
+    .\lynx_m0.exe
+    # When finished, use tray > Quit LYNX.
+    Import-Csv "$env:TEMP\lynx-render-metrics.csv" | Format-List
+
+For both idle and animation runs, record CPU/GPU model, Windows build, monitor configuration, DPI, workload, duration, draw counts, and CPU/memory results from scripts/measure-runtime.ps1. GPU/frame pacing requires a WPR/WPA trace and is not captured by this CSV.
+
+To compare measured CPU-render traces **after a real alternative renderer exists**:
+
+    .\scripts\compare-render-metrics.ps1 -Baseline .\layered.csv -Candidate .\composition.csv
+
+The comparator rejects traces with very few draws and prints relative draw-cost differences. It does not establish visual fidelity, GPU performance, actual display latency or FPS.
+
+### Production acceptance still open
+
+- **ADR-001 compositor selection is still open.** Windows.UI.Composition/DirectComposition must be implemented as comparable candidates before claiming a winner.
+- Native UI Automation tree, Narrator and focus behavior not yet validated on hardware.
+- M4-A fullscreen, monitor, audio-device and resource acceptance not yet complete.
+- Packaging/signing/updater/crash policy not finalized.
 
 ## M4-A — Windows runtime hardening (first slice)
 
