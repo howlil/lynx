@@ -6,6 +6,8 @@
 #include "file_drop_target.hpp"
 #include "media_provider.hpp"
 #include "settings_store.hpp"
+#include "render_metrics.hpp"
+#include "uia_shell.hpp"
 
 #include <windows.h>
 #include <objbase.h>
@@ -41,6 +43,8 @@ constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kMediaMessage = WM_APP + 3;
 constexpr UINT kVolumeMessage = WM_APP + 4;
 constexpr UINT kForegroundMessage = WM_APP + 5;
+constexpr UINT kUiActionMessage = WM_APP + 6;
+constexpr UINT kUiFocusMessage = WM_APP + 7;
 UINT gTaskbarRestarted = 0;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
@@ -80,7 +84,9 @@ struct App {
     HMONITOR chosenMonitor = nullptr;
     HMONITOR dpiMonitor = nullptr;
     bool firstFrame = true;
-    IRawElementProviderSimple* uiaProvider = nullptr;
+    lynx::ShellUiaRoot* uiaProvider = nullptr;
+    lynx::RenderMetrics renderMetrics;
+    int focusedAction=-1;
     std::unique_ptr<lynx::WindowsMediaProvider> mediaProvider;
     lynx::MediaSnapshot mediaSnapshot;
     lynx::MediaActivityBridge mediaBridge;
@@ -91,103 +97,13 @@ struct App {
 };
 App g;
 
-// A single accessible shell button for the M1 surface. Future expanded
-// controls require dedicated fragment providers; this does not pretend
-// those controls exist before implementation.
-class IslandUiaProvider final : public IRawElementProviderSimple, public IInvokeProvider {
-public:
-    explicit IslandUiaProvider(HWND hwnd) : hwnd_(hwnd) {}
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
-        if (!result) return E_POINTER;
-        *result = nullptr;
-        if (iid == __uuidof(IUnknown) || iid == __uuidof(IRawElementProviderSimple)) {
-            *result = static_cast<IRawElementProviderSimple*>(this);
-        } else if (iid == __uuidof(IInvokeProvider)) {
-            *result = static_cast<IInvokeProvider*>(this);
-        } else return E_NOINTERFACE;
-        AddRef();
-        return S_OK;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
-    ULONG STDMETHODCALLTYPE Release() override {
-        const auto remaining = --references_;
-        if (!remaining) delete this;
-        return remaining;
-    }
-
-    HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions* result) override {
-        if (!result) return E_POINTER;
-        *result = ProviderOptions_ServerSideProvider;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID pattern,
-                                                 IUnknown** result) override {
-        if (!result) return E_POINTER;
-        *result = nullptr;
-        if (pattern == UIA_InvokePatternId) {
-            *result = static_cast<IInvokeProvider*>(this);
-            AddRef();
-        }
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID id, VARIANT* value) override {
-        if (!value) return E_POINTER;
-        VariantInit(value);
-        switch (id) {
-            case UIA_ControlTypePropertyId:
-                value->vt=VT_I4;
-                value->lVal=UIA_ButtonControlTypeId;
-                return S_OK;
-            case UIA_NamePropertyId: {
-                const auto view = g.activities.view();
-                const auto selected = g.activities.primary();
-                std::wstring name=L"LYNX Island";
-                if (view==lynx::View::Expanded) name+=L", expanded, invoke to close";
-                else if (view==lynx::View::Hidden) name+=L", hidden";
-                else if (view==lynx::View::Transient) name+=L", "+g.activities.transientText();
-                else if (selected) name+=L", "+selected->title+L", invoke to expand";
-                else name+=L", ambient, invoke to expand";
-                value->bstrVal=SysAllocString(name.c_str());
-                if (!value->bstrVal) return E_OUTOFMEMORY;
-                value->vt=VT_BSTR;
-                return S_OK;
-            }
-            case UIA_AutomationIdPropertyId:
-                value->bstrVal=SysAllocString(L"lynx.island.shell");
-                if (!value->bstrVal) return E_OUTOFMEMORY;
-                value->vt=VT_BSTR;
-                return S_OK;
-            case UIA_IsControlElementPropertyId:
-            case UIA_IsContentElementPropertyId:
-            case UIA_IsEnabledPropertyId:
-                value->vt=VT_BOOL;
-                value->boolVal=g.activities.view()==lynx::View::Hidden
-                    ? VARIANT_FALSE : VARIANT_TRUE;
-                return S_OK;
-            case UIA_IsKeyboardFocusablePropertyId:
-                value->vt=VT_BOOL;
-                value->boolVal=g.activities.view()==lynx::View::Expanded
-                    ? VARIANT_TRUE : VARIANT_FALSE;
-                return S_OK;
-            default: return S_OK;
-        }
-    }
-    HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(
-        IRawElementProviderSimple** result) override {
-        if (!result) return E_POINTER;
-        return UiaHostProviderFromHwnd(hwnd_,result);
-    }
-    HRESULT STDMETHODCALLTYPE Invoke() override {
-        if (!IsWindow(hwnd_) || g.activities.view()==lynx::View::Hidden) return E_FAIL;
-        return PostMessageW(hwnd_,kUiInvokeMessage,0,0) ? S_OK :
-            HRESULT_FROM_WIN32(GetLastError());
-    }
-private:
-    ~IslandUiaProvider() = default;
-    std::atomic<ULONG> references_{1};
-    HWND hwnd_ = nullptr;
-};
+lynx::ContextActions currentActions() {
+    const auto activity=g.activities.primary();
+    return lynx::contextActions(g.activities.view(),activity?activity->id:0,
+        g.focus.state(),
+        g.mediaSnapshot.available && g.mediaSnapshot.canToggle,
+        g.mediaSnapshot.playing,!g.shelf.files().empty());
+}
 
 void diagnostic(const char* operation, DWORD error = 0,
                 int widthPx = 0, int heightPx = 0, unsigned alpha = 0) {
@@ -361,6 +277,7 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
 
 bool drawFrame() {
     if (g.activities.view() == lynx::View::Hidden) return true;
+    lynx::ScopedRenderSample timing(g.renderMetrics);
     updateDpiForMonitor();
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
@@ -548,7 +465,10 @@ bool drawFrame() {
     const DWORD updateError = updated ? 0 : GetLastError();
     if (!updated || g.firstFrame) diagnostic(updated ? "first layered frame OK" :
         "UpdateLayeredWindow failed",updateError,W,H,centerAlpha);
-    if (updated) g.firstFrame = false;
+    if (updated) {
+        g.firstFrame = false;
+        timing.success();
+    }
 
     SelectObject(memory,old);
     DeleteObject(dib);
@@ -986,9 +906,14 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         }
         case WM_GETOBJECT:
             if (static_cast<LONG>(lp)==UiaRootObjectId) {
-                if (!g.uiaProvider) g.uiaProvider=new (std::nothrow) IslandUiaProvider(hwnd);
+                if (!g.uiaProvider) {
+                    g.uiaProvider=new (std::nothrow) lynx::ShellUiaRoot(
+                        hwnd,kUiInvokeMessage,kUiActionMessage,kUiFocusMessage);
+                    if(g.uiaProvider) syncAccessibleState();
+                }
                 if (g.uiaProvider)
-                    return UiaReturnRawElementProvider(hwnd,wp,lp,g.uiaProvider);
+                    return UiaReturnRawElementProvider(hwnd,wp,lp,
+                        static_cast<IRawElementProviderSimple*>(g.uiaProvider));
             }
             break;
         case WM_KEYDOWN:
@@ -1124,10 +1049,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 g.batterySubscription=nullptr;
             }
             if (g.uiaProvider) {
+                g.uiaProvider->invalidate();
                 UiaReturnRawElementProvider(hwnd,0,0,nullptr);
                 g.uiaProvider->Release();
                 g.uiaProvider=nullptr;
             }
+            g.renderMetrics.exportCsv();
             KillTimer(hwnd,kAnimationTimer);
             KillTimer(hwnd,kClockTimer);
             KillTimer(hwnd,kTransientTimer);
