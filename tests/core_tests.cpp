@@ -1,4 +1,4 @@
-#include "../src/core/activity_coordinator.hpp"
+#include "../src/core/media_activity.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -100,5 +100,30 @@ int main() {
     assert(!coordinator.secondary().has_value());
     assert(!coordinator.upsert(Activity{3,1,1,90,L"Late",L"",true}));
 
-    std::cout << "lynx core: geometry, spring, concurrency, and lifecycle PASS\n";
+    // Media snapshots are normalized in a portable boundary, not the renderer.
+    ActivityCoordinator mediaCoordinator;
+    MediaActivityBridge mediaBridge;
+    assert(!mediaBridge.reconcile(mediaCoordinator,MediaObservation{}));
+    assert(mediaCoordinator.view() == View::Ambient);
+    assert(mediaBridge.reconcile(mediaCoordinator,MediaObservation{
+        true,true,L"spotify",L"Track A",L"Artist"}));
+    assert(mediaCoordinator.primary()->title==L"Track A");
+    assert(mediaCoordinator.primary()->subtitle==L"Artist · Playing");
+    assert(mediaBridge.reconcile(mediaCoordinator,MediaObservation{
+        true,false,L"spotify",L"Track A",L"Artist"}));
+    assert(mediaCoordinator.primary()->subtitle==L"Artist · Paused");
+    const auto firstGeneration=mediaBridge.generation();
+    assert(mediaBridge.reconcile(mediaCoordinator,MediaObservation{}));
+    assert(mediaCoordinator.view()==View::Ambient);
+    assert(mediaBridge.generation()>firstGeneration);
+    assert(mediaBridge.reconcile(mediaCoordinator,MediaObservation{
+        true,true,L"spotify",L"Track B",L"Artist"}));
+    assert(mediaCoordinator.primary()->title==L"Track B");
+    const auto secondGeneration=mediaBridge.generation();
+    assert(mediaBridge.reconcile(mediaCoordinator,MediaObservation{
+        true,true,L"browser",L"Podcast",L""}));
+    assert(mediaBridge.generation()>secondGeneration);
+    assert(mediaCoordinator.primary()->title==L"Podcast");
+
+    std::cout << "lynx core: geometry, spring, lifecycle and media bridge PASS\n";
 }
