@@ -1,7 +1,7 @@
-name: M0 Native Build
+name: LYNX Native CI
 on:
   push:
-    branches: [master, "feat/m0-native-shell"]
+    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core"]
   pull_request:
 jobs:
   windows-build:
@@ -17,7 +17,7 @@ jobs:
       - name: Upload Windows feasibility executable
         uses: actions/upload-artifact@v4
         with:
-          name: lynx-m0-windows-x64
+          name: lynx-native-windows-x64
           path: build/Release/lynx_m0.exe
           if-no-files-found: error
   portable-tests:

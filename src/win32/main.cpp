@@ -1,4 +1,4 @@
-#include "../core/island_core.hpp"
+#include "../core/activity_coordinator.hpp"
 
 #include <windows.h>
 #include <objbase.h>
@@ -6,6 +6,9 @@
 #include <oleauto.h>
 #include <shellapi.h>
 #include <gdiplus.h>
+#include <UIAutomation.h>
+#include <atomic>
+#include <new>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -20,6 +23,7 @@ constexpr UINT_PTR kAnimationTimer = 101;
 constexpr UINT_PTR kClockTimer = 102;
 constexpr UINT_PTR kTransientTimer = 103;
 constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
 constexpr float kCanvasWidthDip = 440.0f;
@@ -27,25 +31,127 @@ constexpr float kCanvasHeightDip = 260.0f;
 
 enum MenuId : UINT {
     kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
-    kTransientDemo, kReducedMotion, kFullscreenDemo, kQuit
+    kTimerDemo, kTransientDemo, kReducedMotion, kFullscreenDemo, kQuit
 };
 
 struct App {
     HWND hwnd = nullptr;
     ULONG_PTR gdiplus = 0;
     lynx::Placement placement = lynx::Placement::Floating;
-    lynx::Presentation presentation;
+    lynx::ActivityCoordinator activities;
     lynx::Spring width{232}, height{42}, shoulder{0}, offset{13};
     bool reduced = false;
-    bool demoMedia = false;
+    std::uint64_t demoRevision = 0;
+    std::uint64_t timerRevision = 0;
+    std::uint64_t transientToken = 0;
+    ULONGLONG transientDeadline = 0;
     bool hiddenByDemo = false;
     HWND priorFocus = nullptr;
     int dpi = 96;
     ULONGLONG previousFrame = 0;
     HMONITOR chosenMonitor = nullptr;
     bool firstFrame = true;
+    IRawElementProviderSimple* uiaProvider = nullptr;
 };
 App g;
+
+// A single accessible shell button for the M1 surface. Future expanded
+// controls require dedicated fragment providers; this does not pretend
+// those controls exist before implementation.
+class IslandUiaProvider final : public IRawElementProviderSimple, public IInvokeProvider {
+public:
+    explicit IslandUiaProvider(HWND hwnd) : hwnd_(hwnd) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
+        if (!result) return E_POINTER;
+        *result = nullptr;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IRawElementProviderSimple)) {
+            *result = static_cast<IRawElementProviderSimple*>(this);
+        } else if (iid == __uuidof(IInvokeProvider)) {
+            *result = static_cast<IInvokeProvider*>(this);
+        } else return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto remaining = --references_;
+        if (!remaining) delete this;
+        return remaining;
+    }
+
+    HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions* result) override {
+        if (!result) return E_POINTER;
+        *result = ProviderOptions_ServerSideProvider;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID pattern,
+                                                 IUnknown** result) override {
+        if (!result) return E_POINTER;
+        *result = nullptr;
+        if (pattern == UIA_InvokePatternId) {
+            *result = static_cast<IInvokeProvider*>(this);
+            AddRef();
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID id, VARIANT* value) override {
+        if (!value) return E_POINTER;
+        VariantInit(value);
+        switch (id) {
+            case UIA_ControlTypePropertyId:
+                value->vt=VT_I4;
+                value->lVal=UIA_ButtonControlTypeId;
+                return S_OK;
+            case UIA_NamePropertyId: {
+                const auto view = g.activities.view();
+                const auto selected = g.activities.primary();
+                std::wstring name=L"LYNX Island";
+                if (view==lynx::View::Expanded) name+=L", expanded, invoke to close";
+                else if (view==lynx::View::Hidden) name+=L", hidden";
+                else if (view==lynx::View::Transient) name+=L", "+g.activities.transientText();
+                else if (selected) name+=L", "+selected->title+L", invoke to expand";
+                else name+=L", ambient, invoke to expand";
+                value->bstrVal=SysAllocString(name.c_str());
+                if (!value->bstrVal) return E_OUTOFMEMORY;
+                value->vt=VT_BSTR;
+                return S_OK;
+            }
+            case UIA_AutomationIdPropertyId:
+                value->bstrVal=SysAllocString(L"lynx.island.shell");
+                if (!value->bstrVal) return E_OUTOFMEMORY;
+                value->vt=VT_BSTR;
+                return S_OK;
+            case UIA_IsControlElementPropertyId:
+            case UIA_IsContentElementPropertyId:
+            case UIA_IsEnabledPropertyId:
+                value->vt=VT_BOOL;
+                value->boolVal=g.activities.view()==lynx::View::Hidden
+                    ? VARIANT_FALSE : VARIANT_TRUE;
+                return S_OK;
+            case UIA_IsKeyboardFocusablePropertyId:
+                value->vt=VT_BOOL;
+                value->boolVal=g.activities.view()==lynx::View::Expanded
+                    ? VARIANT_TRUE : VARIANT_FALSE;
+                return S_OK;
+            default: return S_OK;
+        }
+    }
+    HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(
+        IRawElementProviderSimple** result) override {
+        if (!result) return E_POINTER;
+        return UiaHostProviderFromHwnd(hwnd_,result);
+    }
+    HRESULT STDMETHODCALLTYPE Invoke() override {
+        if (!IsWindow(hwnd_) || g.activities.view()==lynx::View::Hidden) return E_FAIL;
+        return PostMessageW(hwnd_,kUiInvokeMessage,0,0) ? S_OK :
+            HRESULT_FROM_WIN32(GetLastError());
+    }
+private:
+    ~IslandUiaProvider() = default;
+    std::atomic<ULONG> references_{1};
+    HWND hwnd_ = nullptr;
+};
 
 void diagnostic(const char* operation, DWORD error = 0,
                 int widthPx = 0, int heightPx = 0, unsigned alpha = 0) {
@@ -82,7 +188,7 @@ void timerAtMinuteBoundary() {
 }
 
 void setTargets() {
-    const auto geo = lynx::target(g.placement, g.presentation.view());
+    const auto geo = lynx::target(g.placement, g.activities.view());
     if (g.reduced) {
         g.width.snap(geo.width);
         g.height.snap(geo.height);
@@ -94,7 +200,7 @@ void setTargets() {
         g.shoulder.retarget(geo.shoulder);
         g.offset.retarget(geo.topOffset);
     }
-    if (g.presentation.view() == lynx::View::Hidden) {
+    if (g.activities.view() == lynx::View::Hidden) {
         KillTimer(g.hwnd, kAnimationTimer);
         ShowWindow(g.hwnd, SW_HIDE);
         return;
@@ -147,7 +253,7 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
 }
 
 bool drawFrame() {
-    if (g.presentation.view() == lynx::View::Hidden) return true;
+    if (g.activities.view() == lynx::View::Hidden) return true;
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
     const float canvasWidthDip = std::ceil(g.width.value()) + 4.0f;
@@ -205,7 +311,7 @@ bool drawFrame() {
 
             const float contentLeft = x + shoulder + 17.0f;
             const float contentRight = x + w - shoulder - 16.0f;
-            const auto currentView = g.presentation.view();
+            const auto currentView = g.activities.view();
 
             if (currentView == lynx::View::Ambient || currentView == lynx::View::Expanded) {
                 SYSTEMTIME now{};
@@ -244,11 +350,12 @@ bool drawFrame() {
                     }
                 }
                 if (currentView == lynx::View::Expanded) {
+                    const auto selected = g.activities.primary();
                     Pen divider(Color(255,40,40,45),1.0f);
                     graphics.DrawLine(&divider,x+20,y+48,x+w-20,y+48);
-                    label(graphics,L"LYNX  /  NATIVE SHELL M0",13,x+23,y+64,
+                    label(graphics,selected ? selected->title : L"LYNX  /  NATIVE SHELL",13,x+23,y+64,
                           Color(255,245,245,247),true);
-                    label(graphics,L"Ambient clock and power are live Windows data.",12,
+                    label(graphics,selected ? selected->subtitle : L"Ambient clock and power are live Windows data.",12,
                           x+23,y+94,Color(255,164,164,170));
                     label(graphics,L"Click to collapse  |  Right-click for scenarios",11,
                           x+23,y+120,Color(255,140,140,148));
@@ -258,12 +365,15 @@ bool drawFrame() {
             } else if (currentView == lynx::View::Compact) {
                 SolidBrush cover(Color(255,68,97,165));
                 graphics.FillEllipse(&cover,x+shoulder+10.0f,y+8.0f,26.0f,26.0f);
-                label(graphics,L"Now playing",12,x+shoulder+46,y+10,
-                      Color(255,245,245,247),true);
-                label(graphics,L"Demo",10,contentRight-36,y+13,
-                      Color(255,164,164,170));
+                const auto selected = g.activities.primary();
+                label(graphics,selected ? selected->title : L"Activity",12,
+                      x+shoulder+46,y+10,Color(255,245,245,247),true);
+                if (g.activities.secondary()) {
+                    SolidBrush indicator(Color(255,10,132,255));
+                    graphics.FillEllipse(&indicator,contentRight-6.0f,y+17.0f,6.0f,6.0f);
+                }
             } else if (currentView == lynx::View::Transient) {
-                label(graphics,L"Power connected",13,contentLeft,y+15,
+                label(graphics,g.activities.transientText(),13,contentLeft,y+15,
                       Color(255,48,209,88),true);
             }
         }
@@ -310,7 +420,8 @@ void refresh() { setTargets(); drawFrame(); }
 void setExpanded(bool wantExpanded) {
     if (wantExpanded) {
         g.priorFocus = GetForegroundWindow();
-        g.presentation.expand();
+        g.activities.expand();
+        if (g.activities.view() != lynx::View::Expanded) return;
         // Intentional expansion may become keyboard-active; passive compact does not.
         auto style = GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style & ~WS_EX_NOACTIVATE);
@@ -318,7 +429,7 @@ void setExpanded(bool wantExpanded) {
         SetForegroundWindow(g.hwnd);
         SetFocus(g.hwnd);
     } else {
-        g.presentation.collapse();
+        g.activities.collapse();
         const auto style = GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
         refresh();
@@ -327,7 +438,7 @@ void setExpanded(bool wantExpanded) {
     }
 }
 
-void toggleExpanded() { setExpanded(g.presentation.view() != lynx::View::Expanded); }
+void toggleExpanded() { setExpanded(g.activities.view() != lynx::View::Expanded); }
 
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
@@ -339,8 +450,9 @@ void menu(HWND hwnd) {
     AppendMenuW(popup, MF_STRING | (g.placement==lynx::Placement::Attached?MF_CHECKED:0),
                 kAttached,L"Top-attached");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
-    AppendMenuW(popup,MF_STRING,kAmbient,L"Ambient (live clock / battery)");
-    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Simulate compact media");
+    AppendMenuW(popup,MF_STRING,kAmbient,L"Clear simulated activities");
+    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Start / update simulated media");
+    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Start / update simulated focus timer");
     AppendMenuW(popup,MF_STRING,kTransientDemo,L"Simulate transient charging");
     AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
                 kReducedMotion,L"Reduced motion");
@@ -358,29 +470,42 @@ void menu(HWND hwnd) {
     PostMessageW(hwnd,WM_NULL,0,0);
     switch (command) {
         case kShowHere:
-            if (g.presentation.fullscreen()) g.presentation.setFullscreen(false);
+            if (g.activities.fullscreen()) g.activities.setFullscreen(false);
             g.hiddenByDemo = false;
             g.chosenMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
-            if (g.presentation.view() == lynx::View::Hidden) g.presentation.ambient();
             diagnostic("show-on-this-monitor");
             break;
         case kFloating: g.placement=lynx::Placement::Floating; break;
         case kAttached: g.placement=lynx::Placement::Attached; break;
-        case kAmbient: g.demoMedia=false; g.presentation.ambient(); break;
-        case kMediaDemo: g.demoMedia=true; g.presentation.compact(); break;
+        case kAmbient:
+            g.activities.collapse();
+            g.activities.end(1,1,++g.demoRevision);
+            g.activities.end(2,1,++g.timerRevision);
+            break;
+        case kMediaDemo:
+            g.activities.upsert(lynx::Activity{1,1,++g.demoRevision,10,
+                  L"Now playing",L"Demo activity source",true});
+            break;
+        case kTimerDemo:
+            g.activities.upsert(lynx::Activity{2,1,++g.timerRevision,20,
+                  L"Focus timer",L"25:00  /  Demo in progress",true});
+            break;
         case kTransientDemo:
-            g.presentation.transient();
-            SetTimer(hwnd,kTransientTimer,2800,nullptr);
+            g.transientToken=g.activities.transient(L"Power connected");
+            if (g.transientToken) {
+                g.transientDeadline=GetTickCount64()+2800;
+                SetTimer(hwnd,kTransientTimer,2800,nullptr);
+            }
             break;
         case kReducedMotion: g.reduced=!g.reduced; break;
         case kFullscreenDemo:
             g.hiddenByDemo=!g.hiddenByDemo;
-            g.presentation.setFullscreen(g.hiddenByDemo);
+            g.activities.setFullscreen(g.hiddenByDemo);
             break;
         case kQuit: DestroyWindow(hwnd); return;
         default: return;
     }
-    if (g.presentation.view() != lynx::View::Expanded) {
+    if (g.activities.view() != lynx::View::Expanded) {
         const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
         HWND restore=g.priorFocus ? g.priorFocus : beforeMenuFocus;
@@ -422,7 +547,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         }
         case WM_MOUSEACTIVATE:
-            if (g.presentation.view() != lynx::View::Expanded) return MA_NOACTIVATE;
+            if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
         case WM_LBUTTONUP:
             toggleExpanded();
@@ -433,8 +558,19 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case WM_HOTKEY:
             if (wp==kHotkeyId) toggleExpanded();
             return 0;
+        case kUiInvokeMessage:
+            toggleExpanded();
+            return 0;
+        case WM_GETOBJECT:
+            if (static_cast<LONG>(lp)==UiaRootObjectId) {
+                if (!g.uiaProvider) g.uiaProvider=new (std::nothrow) IslandUiaProvider(hwnd);
+                if (g.uiaProvider)
+                    return UiaReturnRawElementProvider(hwnd,wp,lp,g.uiaProvider);
+            }
+            break;
         case WM_KEYDOWN:
-            if (wp==VK_ESCAPE && g.presentation.view()==lynx::View::Expanded) {
+            if (g.activities.view()==lynx::View::Expanded &&
+                (wp==VK_ESCAPE || wp==VK_RETURN || wp==VK_SPACE)) {
                 setExpanded(false);
                 return 0;
             }
@@ -442,8 +578,19 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case WM_TIMER:
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
             if (wp==kTransientTimer) {
+                const auto now=GetTickCount64();
+                // Windows timer messages carry only their ID. A queued timeout
+                // from an older notification must not prematurely expire a
+                // newer one, even when the timer ID has been reused.
+                if (g.transientDeadline>now) {
+                    SetTimer(hwnd,kTransientTimer,
+                        static_cast<UINT>(std::max<ULONGLONG>(
+                            1,g.transientDeadline-now)),nullptr);
+                    return 0;
+                }
                 KillTimer(hwnd,kTransientTimer);
-                g.presentation.expireTransient(); refresh(); return 0;
+                if (g.activities.expireTransient(g.transientToken)) refresh();
+                return 0;
             }
             if (wp==kAnimationTimer) {
                 const ULONGLONG now=GetTickCount64();
@@ -477,6 +624,11 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             else if (lp==WM_LBUTTONDBLCLK) toggleExpanded();
             return 0;
         case WM_DESTROY:
+            if (g.uiaProvider) {
+                UiaReturnRawElementProvider(hwnd,0,0,nullptr);
+                g.uiaProvider->Release();
+                g.uiaProvider=nullptr;
+            }
             KillTimer(hwnd,kAnimationTimer);
             KillTimer(hwnd,kClockTimer);
             KillTimer(hwnd,kTransientTimer);
