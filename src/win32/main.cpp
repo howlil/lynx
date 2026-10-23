@@ -227,6 +227,8 @@ void onMediaSnapshot(lynx::MediaSnapshot next) {
     g.mediaSnapshot=std::move(next);
 }
 
+void refresh();
+
 void showTransient(const std::wstring& text,UINT duration=2600) {
     g.transientToken=g.activities.transient(text);
     if(!g.transientToken)return;
@@ -251,10 +253,12 @@ void timerFocusTick() {
     const int remaining=g.focus.remainingSeconds(now);
     const auto newTitle=lynx::FocusTimer::clock(remaining);
     // Do not repaint the entire window for multiple timer callbacks per second.
-    if(!selected || selected->id!=lynx::FocusTimer::kId ||
-        selected->title!=newTitle || g.activities.expanded()) {
+    const bool visibleTimer = selected && selected->id==lynx::FocusTimer::kId;
+    if(visibleTimer && (selected->title!=newTitle || g.activities.expanded())) {
         g.focus.publish(g.activities,now);
         refresh();
+    } else if(!visibleTimer) {
+        g.focus.publish(g.activities,now); // keep state current, without repaint
     }
 }
 
