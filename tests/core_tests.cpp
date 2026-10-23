@@ -2,6 +2,7 @@
 #include "../src/core/focus_timer.hpp"
 #include "../src/core/file_shelf.hpp"
 #include "../src/core/fullscreen_policy.hpp"
+#include "../src/core/context_actions.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -216,6 +217,33 @@ int main() {
     assert(!coversMonitor({1920,0,3840,1080},display)); // second monitor
     assert(!coversMonitor({0,0,0,0},display)); // invalid rect
     assert(coversMonitor({1920,0,3840,1080},{1920,0,3840,1080}));
+
+    // Exactly the same contextual action contract drives UI, keyboard and UIA.
+    using S = ShellAction;
+    assert(contextActions(View::Ambient, FocusTimer::kId,
+        FocusTimer::State::Running,true,true,true).count==0);
+    auto focusActions=contextActions(View::Expanded,FocusTimer::kId,
+        FocusTimer::State::Running,true,false,false);
+    assert(focusActions.count==2);
+    assert(focusActions.at(0)->action==S::FocusToggle);
+    assert(focusActions.at(0)->name==L"Pause focus");
+    assert(focusActions.at(1)->action==S::FocusReset);
+    auto pausedActions=contextActions(View::Expanded,FocusTimer::kId,
+        FocusTimer::State::Paused,false,false,false);
+    assert(pausedActions.at(0)->name==L"Resume focus");
+    assert(contextActions(View::Expanded,FocusTimer::kId,
+        FocusTimer::State::Completed,false,false,false).count==0);
+    auto mediaActions=contextActions(View::Expanded,MediaActivityBridge::kId,
+        FocusTimer::State::Ready,true,true,false);
+    assert(mediaActions.count==1);
+    assert(mediaActions.at(0)->name==L"Pause media");
+    assert(contextActions(View::Expanded,MediaActivityBridge::kId,
+        FocusTimer::State::Ready,false,false,false).count==0);
+    assert(contextActions(View::Expanded,FileShelf::kId,
+        FocusTimer::State::Ready,false,false,true).count==2);
+    assert(contextActions(View::Expanded,FileShelf::kId,
+        FocusTimer::State::Ready,false,false,false).count==0);
+    assert(focusActions.at(-1)==nullptr && focusActions.at(2)==nullptr);
 
     std::cout << "lynx core: geometry, lifecycle, media, timer and shelf PASS\n";
 }
