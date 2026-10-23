@@ -44,6 +44,7 @@ struct App {
     std::uint64_t demoRevision = 0;
     std::uint64_t timerRevision = 0;
     std::uint64_t transientToken = 0;
+    ULONGLONG transientDeadline = 0;
     bool hiddenByDemo = false;
     HWND priorFocus = nullptr;
     int dpi = 96;
@@ -491,7 +492,10 @@ void menu(HWND hwnd) {
             break;
         case kTransientDemo:
             g.transientToken=g.activities.transient(L"Power connected");
-            if (g.transientToken) SetTimer(hwnd,kTransientTimer,2800,nullptr);
+            if (g.transientToken) {
+                g.transientDeadline=GetTickCount64()+2800;
+                SetTimer(hwnd,kTransientTimer,2800,nullptr);
+            }
             break;
         case kReducedMotion: g.reduced=!g.reduced; break;
         case kFullscreenDemo:
@@ -574,8 +578,19 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case WM_TIMER:
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
             if (wp==kTransientTimer) {
+                const auto now=GetTickCount64();
+                // Windows timer messages carry only their ID. A queued timeout
+                // from an older notification must not prematurely expire a
+                // newer one, even when the timer ID has been reused.
+                if (g.transientDeadline>now) {
+                    SetTimer(hwnd,kTransientTimer,
+                        static_cast<UINT>(std::max<ULONGLONG>(
+                            1,g.transientDeadline-now)),nullptr);
+                    return 0;
+                }
                 KillTimer(hwnd,kTransientTimer);
-                g.activities.expireTransient(g.transientToken); refresh(); return 0;
+                if (g.activities.expireTransient(g.transientToken)) refresh();
+                return 0;
             }
             if (wp==kAnimationTimer) {
                 const ULONGLONG now=GetTickCount64();
