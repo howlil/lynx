@@ -581,8 +581,20 @@ void toggleFocus() {
         return;
     }
     if(g.focus.state()==lynx::FocusTimer::State::Running) {
+        const auto selected=g.activities.primary();
+        const bool ownExpanded=g.activities.expanded() && selected &&
+                                 selected->id==lynx::FocusTimer::kId;
         g.focus.pause(now);
         KillTimer(g.hwnd,kFocusTimer);
+        // If deadline passed just before the Pause click, WM_TIMER has not
+        // necessarily run yet. Complete through the same terminal path.
+        if(g.focus.state()==lynx::FocusTimer::State::Completed) {
+            if(ownExpanded) setExpanded(false);
+            g.focus.publish(g.activities,now);
+            showTransient(L"Focus complete",3600);
+            refresh();
+            return;
+        }
     } else if(g.focus.resume(now)) {
         SetTimer(g.hwnd,kFocusTimer,1000,nullptr);
     }
@@ -719,6 +731,12 @@ void menu(HWND hwnd) {
         case kQuit: DestroyWindow(hwnd); return;
         default: return;
     }
+    // Track the application that was active *before* TrackPopupMenu.
+    // The menu temporarily makes LYNX foreground; setExpanded(true) from
+    // a tray command would otherwise capture LYNX itself as priorFocus.
+    if (g.activities.view() == lynx::View::Expanded &&
+        beforeMenuFocus != hwnd && beforeMenuFocus && IsWindow(beforeMenuFocus))
+        g.priorFocus=beforeMenuFocus;
     if (g.activities.view() != lynx::View::Expanded) {
         const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
