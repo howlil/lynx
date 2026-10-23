@@ -59,6 +59,7 @@ int main() {
     // resurrect it; the presentation must reconcile.
     assert(coordinator.end(2,1,2));
     assert(!coordinator.upsert(Activity{2,1,1,200,L"Stale",L"",true}));
+    assert(!coordinator.upsert(Activity{2,1,200,200,L"Post-completion",L"",true}));
     assert(coordinator.primary()->id == 3);
     assert(coordinator.view() == View::Expanded);
     coordinator.collapse();
