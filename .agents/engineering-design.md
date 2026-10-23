@@ -313,3 +313,18 @@ Do not create empty ADR files merely to signal progress; record an actual decisi
 **Validation gate:** recheck Windows x64 build and Linux portable tests at latest head; manual Windows 11 testing still required for OLE drag/drop on the alpha-layered HWND, cursor hit-testing, timer after sleep, audio callback delivery and default device switching, native UIA control actions, 100–200% display scaling, file path error conditions, and idle CPU/memory. No claim of a production-ready file transfer or volume system.
 
 **Risk:** `OleInitialize` requires a compatible UI apartment; the media MTA worker remains isolated. RegisterDragDrop failure must not crash the shell. The CPU-layered renderer still needs compositor comparison before committing to a final Windows rendering stack.
+
+
+## M4-A runtime hardening record — 24 October 2026
+
+This is a **scoped reliability slice**, not a completed M4 or release approval.
+
+- **Fullscreen/foreground graph:** SetWinEventHook(EVENT_SYSTEM_FOREGROUND) posts a UI-thread notification. The UI owner compares the current foreground window bounds with the selected *physical monitor* bounds and suppresses only genuine monitor-covering applications, not ordinary maximized windows which stop at the taskbar. On suppression the activity model remains authoritative; only presentation is hidden. Foreground activation is not taken back when the window hides. Source-independent coverage math is verified in portable tests.
+- **Monitor/DPI recovery:** invalid HMONITOR is replaced using a live monitor; layered surface dimensions derive from the selected monitor effective DPI via GetDpiForMonitor. A manual tray move invalidates the previous DPI cache.
+- **Audio lifecycle:** IMMNotificationClient observes default multimedia render endpoint changes and posts to HWND; the UI STA rebinds IAudioEndpointVolume, unsubscribing from the old device. Audio callbacks never access the drawing or activity model directly. Rebinding also resets previous volume/mute baseline to avoid spurious notifications.
+- **Wake/shell recovery:** Focus deadline checked immediately on sleep/resume; Explorer's TaskbarCreated notification causes tray icon reconstruction.
+- **Proof infrastructure:** scripts/measure-runtime.ps1 reports measured process CPU, private bytes, working set and handle count. These are not reported as achieved metrics without a documented Windows device sample. GPU/frame pacing requires ETW Windows Performance Recorder/Analyzer.
+
+**Evidence status:** compilation/unit tests are verified by GitHub CI on the M4 branch. Correct behavior across true fullscreen apps, hardware audio output hot-swap, multi-DPI monitor disconnect, Explorer restart and sleep must still be accepted on a Windows device. The existing GDI+ layered renderer is an experimental baseline only. Full UIA child controls, compositor comparison (ADR-001), installer/updater and performance gates are **still open**.
+
+Important interface contracts retained: v3 Floating and Top-attached geometry, Ambient clock/lens/power, coordinator-controlled activity presentation and non-activating passive feedback. None of these require a new cloud process, plugin host or developer-focused surface.
