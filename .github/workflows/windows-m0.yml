@@ -14,6 +14,12 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Core tests
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Upload Windows feasibility executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: lynx-m0-windows-x64
+          path: build/Release/lynx_m0.exe
+          if-no-files-found: error
   portable-tests:
     runs-on: ubuntu-latest
     steps:
