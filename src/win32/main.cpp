@@ -1,4 +1,4 @@
-#include "../core/activity_coordinator.hpp"
+#include "../core/media_activity.hpp"
 #include "media_provider.hpp"
 #include "settings_store.hpp"
 
@@ -60,10 +60,7 @@ struct App {
     IRawElementProviderSimple* uiaProvider = nullptr;
     std::unique_ptr<lynx::WindowsMediaProvider> mediaProvider;
     lynx::MediaSnapshot mediaSnapshot;
-    std::wstring mediaSource;
-    std::uint64_t mediaGeneration = 1;
-    std::uint64_t mediaRevision = 0;
-    bool mediaActive = false;
+    lynx::MediaActivityBridge mediaBridge;
     SYSTEM_POWER_STATUS power{};
     bool powerKnown = false;
     HPOWERNOTIFY powerSourceSubscription = nullptr;
@@ -209,32 +206,10 @@ void readPower() {
 // This reducer runs only on the HWND UI thread. The provider's background MTA
 // posts owned snapshots; it never calls ActivityCoordinator or GDI+ directly.
 void onMediaSnapshot(lynx::MediaSnapshot next) {
-    if (!next.available) {
-        if (g.mediaActive) {
-            g.activities.end(100,g.mediaGeneration,++g.mediaRevision);
-            g.mediaActive=false;
-        }
-        g.mediaSnapshot=std::move(next);
-        return;
-    }
-    if (g.mediaActive && next.source != g.mediaSource) {
-        g.activities.end(100,g.mediaGeneration,++g.mediaRevision);
-        ++g.mediaGeneration;
-        g.mediaRevision=0;
-        g.mediaActive=false;
-    }
-    g.mediaSource=next.source;
+    g.mediaBridge.reconcile(g.activities,lynx::MediaObservation{
+        next.available,next.playing,next.source,next.title,next.artist});
     g.mediaSnapshot=std::move(next);
-    const std::wstring name = g.mediaSnapshot.title.empty() ?
-        L"Now Playing" : g.mediaSnapshot.title;
-    const std::wstring detail = g.mediaSnapshot.artist.empty() ?
-        (g.mediaSnapshot.playing ? L"Playing" : L"Paused") :
-        (g.mediaSnapshot.artist +
-         (g.mediaSnapshot.playing ? L" · Playing" : L" · Paused"));
-    if (g.activities.upsert(lynx::Activity{100,g.mediaGeneration,++g.mediaRevision,30,
-            name,detail,true})) g.mediaActive=true;
 }
-
 
 void timerAtMinuteBoundary() {
     SYSTEMTIME now{};
@@ -660,13 +635,13 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                  reinterpret_cast<lynx::MediaSnapshot*>(lp));
             if (!media) return 0;
             const auto previousView=g.activities.view();
-            const auto oldSource=g.mediaSource;
+            const auto oldSource=g.mediaSnapshot.source;
             const auto oldAvailable=g.mediaSnapshot.available;
             const auto oldPlaying=g.mediaSnapshot.playing;
             const auto oldTitle=g.mediaSnapshot.title;
             onMediaSnapshot(std::move(*media));
             if (previousView!=g.activities.view() ||
-                oldSource!=g.mediaSource ||
+                oldSource!=g.mediaSnapshot.source ||
                 oldAvailable!=g.mediaSnapshot.available ||
                 oldPlaying!=g.mediaSnapshot.playing ||
                 oldTitle!=g.mediaSnapshot.title)
