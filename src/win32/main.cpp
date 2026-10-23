@@ -668,12 +668,18 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             const auto oldAvailable=g.mediaSnapshot.available;
             const auto oldPlaying=g.mediaSnapshot.playing;
             const auto oldTitle=g.mediaSnapshot.title;
+            const auto oldArtist=g.mediaSnapshot.artist;
+            const auto oldCanToggle=g.mediaSnapshot.canToggle;
+            const auto oldError=g.mediaSnapshot.error;
             onMediaSnapshot(std::move(*media));
             if (previousView!=g.activities.view() ||
                 oldSource!=g.mediaSnapshot.source ||
                 oldAvailable!=g.mediaSnapshot.available ||
                 oldPlaying!=g.mediaSnapshot.playing ||
-                oldTitle!=g.mediaSnapshot.title)
+                oldTitle!=g.mediaSnapshot.title ||
+                oldArtist!=g.mediaSnapshot.artist ||
+                oldCanToggle!=g.mediaSnapshot.canToggle ||
+                oldError!=g.mediaSnapshot.error)
                 refresh();
             return 0;
         }
