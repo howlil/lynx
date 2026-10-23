@@ -12,7 +12,7 @@ namespace lynx {
 // RegisterDragDrop requires OleInitialize on the window/UI thread.
 class FileDropTarget final : public IDropTarget {
 public:
-    using Handler=std::function<void(std::vector<std::wstring>)>;
+    using Handler=std::function<bool(std::vector<std::wstring>)>;
     explicit FileDropTarget(Handler onDrop):onDrop_(std::move(onDrop)){}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
         if(!out)return E_POINTER;
@@ -62,8 +62,7 @@ public:
             }
         }
         ReleaseStgMedium(&medium);
-        if(!paths.empty()) {
-            onDrop_(std::move(paths));
+        if(!paths.empty() && onDrop_(std::move(paths))) {
             *effect=DROPEFFECT_COPY; // source data never deleted
         }
         return S_OK;
