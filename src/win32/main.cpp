@@ -1,4 +1,6 @@
 #include "../core/activity_coordinator.hpp"
+#include "media_provider.hpp"
+#include "settings_store.hpp"
 
 #include <windows.h>
 #include <objbase.h>
@@ -15,6 +17,9 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <memory>
+#include <optional>
+#include <utility>
 
 using namespace Gdiplus;
 
@@ -24,6 +29,7 @@ constexpr UINT_PTR kClockTimer = 102;
 constexpr UINT_PTR kTransientTimer = 103;
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUiInvokeMessage = WM_APP + 2;
+constexpr UINT kMediaMessage = WM_APP + 3;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
 constexpr float kCanvasWidthDip = 440.0f;
@@ -31,7 +37,7 @@ constexpr float kCanvasHeightDip = 260.0f;
 
 enum MenuId : UINT {
     kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
-    kTimerDemo, kTransientDemo, kReducedMotion, kFullscreenDemo, kQuit
+    kTimerDemo, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit
 };
 
 struct App {
@@ -52,6 +58,16 @@ struct App {
     HMONITOR chosenMonitor = nullptr;
     bool firstFrame = true;
     IRawElementProviderSimple* uiaProvider = nullptr;
+    std::unique_ptr<lynx::WindowsMediaProvider> mediaProvider;
+    lynx::MediaSnapshot mediaSnapshot;
+    std::wstring mediaSource;
+    std::uint64_t mediaGeneration = 1;
+    std::uint64_t mediaRevision = 0;
+    bool mediaActive = false;
+    SYSTEM_POWER_STATUS power{};
+    bool powerKnown = false;
+    HPOWERNOTIFY powerSourceSubscription = nullptr;
+    HPOWERNOTIFY batterySubscription = nullptr;
 };
 App g;
 
@@ -179,6 +195,46 @@ void diagnostic(const char* operation, DWORD error = 0,
 }
 
 float scale() { return static_cast<float>(g.dpi) / 96.0f; }
+
+void readPower() {
+    SYSTEM_POWER_STATUS current{};
+    if (GetSystemPowerStatus(&current)) {
+        g.power=current;
+        g.powerKnown=true;
+    } else {
+        g.powerKnown=false;
+    }
+}
+
+// This reducer runs only on the HWND UI thread. The provider's background MTA
+// posts owned snapshots; it never calls ActivityCoordinator or GDI+ directly.
+void onMediaSnapshot(lynx::MediaSnapshot next) {
+    if (!next.available) {
+        if (g.mediaActive) {
+            g.activities.end(100,g.mediaGeneration,++g.mediaRevision);
+            g.mediaActive=false;
+        }
+        g.mediaSnapshot=std::move(next);
+        return;
+    }
+    if (g.mediaActive && next.source != g.mediaSource) {
+        g.activities.end(100,g.mediaGeneration,++g.mediaRevision);
+        ++g.mediaGeneration;
+        g.mediaRevision=0;
+        g.mediaActive=false;
+    }
+    g.mediaSource=next.source;
+    g.mediaSnapshot=std::move(next);
+    const std::wstring name = g.mediaSnapshot.title.empty() ?
+        L"Now Playing" : g.mediaSnapshot.title;
+    const std::wstring detail = g.mediaSnapshot.artist.empty() ?
+        (g.mediaSnapshot.playing ? L"Playing" : L"Paused") :
+        (g.mediaSnapshot.artist +
+         (g.mediaSnapshot.playing ? L" · Playing" : L" · Paused"));
+    if (g.activities.upsert(lynx::Activity{100,g.mediaGeneration,++g.mediaRevision,30,
+            name,detail,true})) g.mediaActive=true;
+}
+
 
 void timerAtMinuteBoundary() {
     SYSTEMTIME now{};
@@ -326,8 +382,8 @@ bool drawFrame() {
                 graphics.FillEllipse(&lens,center-17.0f,y+16.0f,34.0f,10.0f);
                 graphics.DrawEllipse(&lensStroke,center-17.0f,y+16.0f,34.0f,10.0f);
 
-                SYSTEM_POWER_STATUS power{};
-                const bool read = GetSystemPowerStatus(&power) != FALSE;
+                const auto& power = g.power;
+                const bool read = g.powerKnown;
                 std::wstring powerText = L"";
                 if (read && power.BatteryFlag != 128 &&
                     power.BatteryFlag != 255 && power.BatteryLifePercent != 255) {
@@ -453,6 +509,11 @@ void menu(HWND hwnd) {
     AppendMenuW(popup,MF_STRING,kAmbient,L"Clear simulated activities");
     AppendMenuW(popup,MF_STRING,kMediaDemo,L"Start / update simulated media");
     AppendMenuW(popup,MF_STRING,kTimerDemo,L"Start / update simulated focus timer");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING |
+                ((g.mediaSnapshot.available && g.mediaSnapshot.canToggle)?MF_ENABLED:MF_GRAYED),
+                kToggleMedia,g.mediaSnapshot.playing?
+                  L"Pause current Windows media":L"Play current Windows media");
     AppendMenuW(popup,MF_STRING,kTransientDemo,L"Simulate transient charging");
     AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
                 kReducedMotion,L"Reduced motion");
@@ -475,8 +536,16 @@ void menu(HWND hwnd) {
             g.chosenMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
             diagnostic("show-on-this-monitor");
             break;
-        case kFloating: g.placement=lynx::Placement::Floating; break;
-        case kAttached: g.placement=lynx::Placement::Attached; break;
+        case kFloating:
+            g.placement=lynx::Placement::Floating;
+            if (!lynx::WindowsSettingsStore::savePlacement(g.placement))
+                diagnostic("save placement failed",GetLastError());
+            break;
+        case kAttached:
+            g.placement=lynx::Placement::Attached;
+            if (!lynx::WindowsSettingsStore::savePlacement(g.placement))
+                diagnostic("save placement failed",GetLastError());
+            break;
         case kAmbient:
             g.activities.collapse();
             g.activities.end(1,1,++g.demoRevision);
@@ -497,7 +566,15 @@ void menu(HWND hwnd) {
                 SetTimer(hwnd,kTransientTimer,2800,nullptr);
             }
             break;
-        case kReducedMotion: g.reduced=!g.reduced; break;
+        case kToggleMedia:
+            if (g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
+                g.mediaProvider->togglePlayPause();
+            break;
+        case kReducedMotion:
+            g.reduced=!g.reduced;
+            if (!lynx::WindowsSettingsStore::saveReducedMotion(g.reduced))
+                diagnostic("save motion preference failed",GetLastError());
+            break;
         case kFullscreenDemo:
             g.hiddenByDemo=!g.hiddenByDemo;
             g.activities.setFullscreen(g.hiddenByDemo);
@@ -540,6 +617,23 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0)) {
                 g.reduced=!animations;
             }
+            const auto preferences=lynx::WindowsSettingsStore::load();
+            g.placement=preferences.placement;
+            if (preferences.hasReducedMotionOverride)
+                g.reduced=preferences.reducedMotion;
+            // Prepare springs at the persisted placement before the first frame.
+            const auto initialGeometry=lynx::target(g.placement,lynx::View::Ambient);
+            g.width.snap(initialGeometry.width);
+            g.height.snap(initialGeometry.height);
+            g.shoulder.snap(initialGeometry.shoulder);
+            g.offset.snap(initialGeometry.topOffset);
+            readPower();
+            g.powerSourceSubscription=RegisterPowerSettingNotification(
+                hwnd,&GUID_ACDC_POWER_SOURCE,DEVICE_NOTIFY_WINDOW_HANDLE);
+            g.batterySubscription=RegisterPowerSettingNotification(
+                hwnd,&GUID_BATTERY_PERCENTAGE_REMAINING,DEVICE_NOTIFY_WINDOW_HANDLE);
+            if (!g.powerSourceSubscription || !g.batterySubscription)
+                diagnostic("power subscribe failed",GetLastError());
             RegisterHotKey(hwnd,kHotkeyId,MOD_CONTROL|MOD_ALT,VK_SPACE);
             addTray(hwnd);
             timerAtMinuteBoundary();
@@ -561,6 +655,24 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case kUiInvokeMessage:
             toggleExpanded();
             return 0;
+        case kMediaMessage: {
+            std::unique_ptr<lynx::MediaSnapshot> media(
+                 reinterpret_cast<lynx::MediaSnapshot*>(lp));
+            if (!media) return 0;
+            const auto previousView=g.activities.view();
+            const auto oldSource=g.mediaSource;
+            const auto oldAvailable=g.mediaSnapshot.available;
+            const auto oldPlaying=g.mediaSnapshot.playing;
+            const auto oldTitle=g.mediaSnapshot.title;
+            onMediaSnapshot(std::move(*media));
+            if (previousView!=g.activities.view() ||
+                oldSource!=g.mediaSource ||
+                oldAvailable!=g.mediaSnapshot.available ||
+                oldPlaying!=g.mediaSnapshot.playing ||
+                oldTitle!=g.mediaSnapshot.title)
+                refresh();
+            return 0;
+        }
         case WM_GETOBJECT:
             if (static_cast<LONG>(lp)==UiaRootObjectId) {
                 if (!g.uiaProvider) g.uiaProvider=new (std::nothrow) IslandUiaProvider(hwnd);
@@ -605,12 +717,36 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_TIMECHANGE:
-        case WM_POWERBROADCAST:
-            if (msg==WM_POWERBROADCAST && wp!=PBT_APMPOWERSTATUSCHANGE &&
-                wp!=PBT_APMRESUMEAUTOMATIC && wp!=PBT_APMRESUMESUSPEND) break;
             timerAtMinuteBoundary();
             drawFrame();
-            return TRUE;
+            return 0;
+        case WM_POWERBROADCAST:
+            if (wp==PBT_POWERSETTINGCHANGE || wp==PBT_APMPOWERSTATUSCHANGE ||
+                wp==PBT_APMRESUMEAUTOMATIC || wp==PBT_APMRESUMESUSPEND) {
+                // Cache hardware data once per change, never once per animation frame.
+                const auto previous=g.power;
+                const bool known=g.powerKnown;
+                readPower();
+                const bool changed = known!=g.powerKnown ||
+                  (g.powerKnown && (!known ||
+                    previous.ACLineStatus!=g.power.ACLineStatus ||
+                    previous.BatteryLifePercent!=g.power.BatteryLifePercent ||
+                    previous.BatteryFlag!=g.power.BatteryFlag));
+                if (changed) {
+                    const bool chargingChanged=known && g.powerKnown &&
+                        previous.ACLineStatus != g.power.ACLineStatus;
+                    if (chargingChanged && g.power.ACLineStatus == 1) {
+                        g.transientToken=g.activities.transient(L"Power connected");
+                        if (g.transientToken) {
+                            g.transientDeadline=GetTickCount64()+2800;
+                            SetTimer(hwnd,kTransientTimer,2800,nullptr);
+                        }
+                    }
+                    refresh();
+                }
+                return TRUE;
+            }
+            break;
         case WM_DISPLAYCHANGE:
         case WM_DPICHANGED:
             g.dpi=static_cast<int>(GetDpiForWindow(hwnd));
@@ -624,6 +760,18 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             else if (lp==WM_LBUTTONDBLCLK) toggleExpanded();
             return 0;
         case WM_DESTROY:
+            g.mediaProvider.reset(); // join MTA before HWND is destroyed
+            MSG unconsumed{};
+            while (PeekMessageW(&unconsumed,hwnd,kMediaMessage,kMediaMessage,PM_REMOVE))
+                delete reinterpret_cast<lynx::MediaSnapshot*>(unconsumed.lParam);
+            if (g.powerSourceSubscription) {
+                UnregisterPowerSettingNotification(g.powerSourceSubscription);
+                g.powerSourceSubscription=nullptr;
+            }
+            if (g.batterySubscription) {
+                UnregisterPowerSettingNotification(g.batterySubscription);
+                g.batterySubscription=nullptr;
+            }
             if (g.uiaProvider) {
                 UiaReturnRawElementProvider(hwnd,0,0,nullptr);
                 g.uiaProvider->Release();
@@ -689,6 +837,13 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     diagnostic("startup overlay shown");
+    g.mediaProvider=std::make_unique<lynx::WindowsMediaProvider>(
+        [hwnd](lynx::MediaSnapshot snapshot) {
+            auto message=std::make_unique<lynx::MediaSnapshot>(std::move(snapshot));
+            if (PostMessageW(hwnd,kMediaMessage,0,
+                    reinterpret_cast<LPARAM>(message.get())))
+                (void)message.release(); // ownership transfers to UI message
+        });
     MSG msg{};
     while(GetMessageW(&msg,nullptr,0,0)>0) {
         TranslateMessage(&msg);
