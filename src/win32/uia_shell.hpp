@@ -22,6 +22,8 @@ struct AccessibleSnapshot {
     bool expanded=false;
     int focused=-1;
     int count=0;
+    std::uint32_t ownerId=0;
+    std::uint64_t ownerGeneration=0;
     std::wstring name=L"LYNX Island";
     RECT screen{};
     std::array<AccessibleAction,2> actions{};
@@ -206,8 +208,11 @@ public:
     ShellUiaButton(ShellUiaRoot* root,int index):root_(root),index_(index){
         root_->AddRef();
         const auto snapshot=root_->snapshot();
-        if(index_>=0 && index_<snapshot.count)
+        if(index_>=0 && index_<snapshot.count) {
             originalKind_=snapshot.actions[index_].kind;
+            ownerId_=snapshot.ownerId;
+            ownerGeneration_=snapshot.ownerGeneration;
+        }
     }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
         if(!output)return E_POINTER;
@@ -240,7 +245,8 @@ public:
         VariantInit(v);
         auto s=root_->snapshot();
         const bool live=s.expanded && index_<s.count &&
-            s.actions[index_].kind==originalKind_;
+            s.actions[index_].kind==originalKind_ &&
+            s.ownerId==ownerId_ && s.ownerGeneration==ownerGeneration_;
         switch(id) {
             case UIA_ControlTypePropertyId:
                 v->vt=VT_I4;v->lVal=UIA_ButtonControlTypeId;return S_OK;
@@ -294,7 +300,8 @@ public:
         if(!r)return E_POINTER;
         const auto s=root_->snapshot();
         if(!s.expanded || index_>=s.count ||
-           s.actions[index_].kind!=originalKind_) {
+           s.actions[index_].kind!=originalKind_ ||
+           s.ownerId!=ownerId_ || s.ownerGeneration!=ownerGeneration_) {
             *r=UiaRect{0,0,0,0};
             return S_OK;
         }
@@ -311,8 +318,11 @@ public:
         auto s=root_->snapshot();
         HWND hwnd=root_->hwnd();
         if(!s.expanded || index_>=s.count || !hwnd ||
-           s.actions[index_].kind!=originalKind_)return UIA_E_ELEMENTNOTAVAILABLE;
-        return PostMessageW(hwnd,root_->focusMessage(),static_cast<WPARAM>(index_),0)
+           s.actions[index_].kind!=originalKind_ ||
+           s.ownerId!=ownerId_ || s.ownerGeneration!=ownerGeneration_)
+            return UIA_E_ELEMENTNOTAVAILABLE;
+        return PostMessageW(hwnd,root_->focusMessage(),static_cast<WPARAM>(index_),
+                        static_cast<LPARAM>(ownerGeneration_))
             ? S_OK:UIA_E_ELEMENTNOTAVAILABLE;
     }
     HRESULT STDMETHODCALLTYPE get_FragmentRoot(IRawElementProviderFragmentRoot** out) override {
@@ -324,11 +334,13 @@ public:
         const auto s=root_->snapshot();
         HWND hwnd=root_->hwnd();
         if(!hwnd || !s.expanded || index_>=s.count ||
-           s.actions[index_].kind!=originalKind_)
+           s.actions[index_].kind!=originalKind_ ||
+           s.ownerId!=ownerId_ || s.ownerGeneration!=ownerGeneration_)
             return UIA_E_ELEMENTNOTAVAILABLE;
         const auto kind=originalKind_;
         // Window owner must revalidate current source capability before action.
-        return PostMessageW(hwnd,root_->actionMessage(),static_cast<WPARAM>(kind),0)
+        return PostMessageW(hwnd,root_->actionMessage(),static_cast<WPARAM>(kind),
+                        static_cast<LPARAM>(ownerGeneration_))
             ? S_OK:UIA_E_ELEMENTNOTAVAILABLE;
     }
 private:
@@ -337,6 +349,8 @@ private:
     ShellUiaRoot* root_;
     int index_=0;
     ShellAction originalKind_=ShellAction::None;
+    std::uint32_t ownerId_=0;
+    std::uint64_t ownerGeneration_=0;
 };
 
 inline HRESULT ShellUiaRoot::createChild(int index,IRawElementProviderFragment** out) {
