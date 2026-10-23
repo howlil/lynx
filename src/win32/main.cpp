@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <cstdio>
+#include <cstdint>
 #include <string>
 
 using namespace Gdiplus;
@@ -40,8 +42,35 @@ struct App {
     HWND priorFocus = nullptr;
     int dpi = 96;
     ULONGLONG previousFrame = 0;
+    HMONITOR chosenMonitor = nullptr;
+    bool firstFrame = true;
 };
 App g;
+
+void diagnostic(const char* operation, DWORD error = 0,
+                int widthPx = 0, int heightPx = 0, unsigned alpha = 0) {
+    char temp[MAX_PATH] = {};
+    const DWORD n = GetTempPathA(MAX_PATH, temp);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::string path = std::string(temp) + "lynx-m0.log";
+    HANDLE file = CreateFileA(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    char line[512] = {};
+    const int count = sprintf_s(line,
+        "%04u-%02u-%02u %02u:%02u:%02u.%03u %-30s error=%lu hwnd=%p pixels=%dx%d center-alpha=%u visible=%d dpi=%d\r\n",
+        now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,
+        operation,static_cast<unsigned long>(error),static_cast<void*>(g.hwnd),widthPx,heightPx,
+        alpha,g.hwnd && IsWindowVisible(g.hwnd) ? 1 : 0,g.dpi);
+    if (count > 0) {
+        DWORD written=0;
+        WriteFile(file,line,static_cast<DWORD>(count),&written,nullptr);
+        OutputDebugStringA(line);
+    }
+    CloseHandle(file);
+}
 
 float scale() { return static_cast<float>(g.dpi) / 96.0f; }
 
@@ -117,17 +146,24 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
     graphics.DrawString(text.c_str(), -1, &font, PointF(x,y), &brush);
 }
 
-void drawFrame() {
-    if (g.presentation.view() == lynx::View::Hidden) return;
+bool drawFrame() {
+    if (g.presentation.view() == lynx::View::Hidden) return true;
     const float dpi = scale();
-    const int W = static_cast<int>(std::ceil(kCanvasWidthDip * dpi));
-    const int H = static_cast<int>(std::ceil(kCanvasHeightDip * dpi));
-    if (W <= 0 || H <= 0) return;
+    // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
+    const float canvasWidthDip = std::ceil(g.width.value()) + 4.0f;
+    const float canvasHeightDip = std::ceil(g.offset.value() + g.height.value()) + 3.0f;
+    const int W = static_cast<int>(std::ceil(canvasWidthDip * dpi));
+    const int H = static_cast<int>(std::ceil(canvasHeightDip * dpi));
+    if (W <= 0 || H <= 0) { diagnostic("invalid surface dimensions"); return false; }
 
     HDC screen = GetDC(nullptr);
-    if (!screen) return;
+    if (!screen) { diagnostic("GetDC failed", GetLastError()); return false; }
     HDC memory = CreateCompatibleDC(screen);
-    if (!memory) { ReleaseDC(nullptr,screen); return; }
+    if (!memory) {
+        diagnostic("CreateCompatibleDC failed",GetLastError());
+        ReleaseDC(nullptr,screen);
+        return false;
+    }
 
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -140,9 +176,10 @@ void drawFrame() {
     HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &pixels, nullptr, 0);
     if (!dib || !pixels) {
         if (dib) DeleteObject(dib);
+        diagnostic("CreateDIBSection failed",GetLastError(),W,H);
         DeleteDC(memory);
         ReleaseDC(nullptr,screen);
-        return;
+        return false;
     }
     const HGDIOBJ old = SelectObject(memory, dib);
 
@@ -156,7 +193,7 @@ void drawFrame() {
 
         const float w = g.width.value(), h = g.height.value();
         if (w > 10.0f && h > 5.0f) {
-            const float x = (kCanvasWidthDip-w)*0.5f;
+            const float x = 2.0f;
             const float y = g.offset.value();
             const float shoulder = g.shoulder.value();
             const bool attached = g.placement == lynx::Placement::Attached;
@@ -232,8 +269,19 @@ void drawFrame() {
         }
     }
 
+    // The center of the black capsule must be opaque. An empty alpha surface
+    // leaves a running process with no visible UI.
+    const int sampleX = std::clamp(W / 2, 0, W - 1);
+    const int sampleY = std::clamp(static_cast<int>((g.offset.value() + g.height.value() * .5f) * dpi), 0, H - 1);
+    const unsigned centerAlpha = (static_cast<std::uint32_t*>(pixels)[sampleY * W + sampleX] >> 24) & 0xffu;
+    if (centerAlpha == 0) {
+        diagnostic("blank alpha buffer",0,W,H,centerAlpha);
+        SelectObject(memory,old); DeleteObject(dib); DeleteDC(memory); ReleaseDC(nullptr,screen);
+        return false;
+    }
     MONITORINFO monitor{sizeof(MONITORINFO)};
-    HMONITOR display = MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTOPRIMARY);
+    HMONITOR display = g.chosenMonitor ? g.chosenMonitor :
+        MonitorFromWindow(g.hwnd, MONITOR_DEFAULTTOPRIMARY);
     if (!GetMonitorInfoW(display,&monitor)) {
         monitor.rcMonitor = RECT{0,0,GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN)};
     }
@@ -243,12 +291,18 @@ void drawFrame() {
     POINT src{0,0};
     SIZE size{W,H};
     BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
-    UpdateLayeredWindow(g.hwnd, screen, &dst, &size, memory, &src, 0, &blend, ULW_ALPHA);
+    const BOOL updated = UpdateLayeredWindow(g.hwnd, screen, &dst, &size,
+                                             memory, &src, 0, &blend, ULW_ALPHA);
+    const DWORD updateError = updated ? 0 : GetLastError();
+    if (!updated || g.firstFrame) diagnostic(updated ? "first layered frame OK" :
+        "UpdateLayeredWindow failed",updateError,W,H,centerAlpha);
+    if (updated) g.firstFrame = false;
 
     SelectObject(memory,old);
     DeleteObject(dib);
     DeleteDC(memory);
     ReleaseDC(nullptr,screen);
+    return updated != FALSE;
 }
 
 void refresh() { setTargets(); drawFrame(); }
@@ -355,9 +409,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             RegisterHotKey(hwnd,kHotkeyId,MOD_CONTROL|MOD_ALT,VK_SPACE);
             addTray(hwnd);
             timerAtMinuteBoundary();
-            refresh();
+            diagnostic("WM_CREATE complete");
             return 0;
         }
+        case WM_MOUSEACTIVATE:
+            if (g.presentation.view() != lynx::View::Expanded) return MA_NOACTIVATE;
+            break;
         case WM_LBUTTONUP:
             toggleExpanded();
             return 0;
@@ -447,8 +504,24 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     if (!hwnd) {
         GdiplusShutdown(g.gdiplus); CloseHandle(singleton); return 3;
     }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    g.chosenMonitor=MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+    // First supply fully initialized layered pixels before showing the window.
+    if (!drawFrame()) {
+        diagnostic("startup aborted");
+        MessageBoxW(nullptr,
+            L"LYNX cannot render its Island.\n\nSee %TEMP%\\lynx-m0.log for the Windows error code and alpha diagnostics.",
+            L"LYNX M0 — Overlay initialization failed", MB_OK | MB_ICONERROR | MB_TOPMOST);
+        DestroyWindow(hwnd);
+        GdiplusShutdown(g.gdiplus);
+        CloseHandle(singleton);
+        return 4;
+    }
     ShowWindow(hwnd,SW_SHOWNOACTIVATE);
-    drawFrame();
+    SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    diagnostic("startup overlay shown");
     MSG msg{};
     while(GetMessageW(&msg,nullptr,0,0)>0) {
         TranslateMessage(&msg);
