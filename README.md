@@ -4,6 +4,42 @@ A native Windows 11 Dynamic Island utility, starting with a **core feasibility e
 
 **Current status: M3 general-user utilities, stacked on M2/M1/M0. Not a completed/released application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
 
+## M4-A — Windows runtime hardening (first slice)
+
+Branch: feat/m4-runtime-hardening (based on merged master). **Incremental hardening only; not a production certification.**
+
+### Runtime changes
+
+- **Fullscreen visibility:** event-driven WinEvent foreground observer checks whether a visible non-minimized foreground window covers the *physical monitor*. Normal maximized windows leaving the taskbar visible do not trigger hiding. Island restores when fullscreen ends, preserving activities and focus.
+- **Display recovery:** removed/disconnected monitor handles fall back to a live display. Layered drawing follows the selected monitor's effective DPI, including when the user changes the monitor through tray.
+- **Audio hot-swap:** IMMNotificationClient listens for default multimedia output changes. The UI thread releases the previous endpoint, subscribes to the new one, and resets the volume baseline without showing a false HUD notification.
+- **Session recovery:** Focus timers reconcile immediately after sleep/resume; tray icon is recreated after Explorer restarts.
+- **Metrics:** scripts/measure-runtime.ps1 records process CPU, working set, private bytes and handle count. It does *not* measure GPU/frame pacing.
+
+### Windows 11 manual acceptance (not proved by CI)
+
+1. Same-monitor fullscreen video/borderless apps: Island hides and restores. Normal maximized apps must not hide it. Repeat on Floating and Top-attached.
+2. Switch target monitor between screens with 100/125/150/200% scale. Disconnect/reconnect displays; test click-through outside capsule and no off-screen placement.
+3. Change default audio output across speakers/USB/Bluetooth. Volume feedback should follow current default **multimedia** device; no fictitious volume event when devices switch.
+4. Sleep during a short Focus timer. Resume should settle expired timer exactly once.
+5. Restart Explorer; tray icon recovers, app still quits, no duplicate instances.
+6. Record stable Ambient idle and active runs separately. From the repository root, with LYNX running:
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File scripts/measure-runtime.ps1 -Seconds 120 -OutputCsv lynx-idle.csv
+~~~
+
+Record OS build, CPU/RAM/GPU, monitor layout, display DPI and current workload. Use WPR/WPA for GPU/frame pacing. Sampling CSV alone cannot prove animation smoothness.
+
+### Still open for production
+
+- The CPU-updated per-pixel alpha renderer has **not** been objectively compared with Windows Composition or DirectComposition; ADR-001 stays open until hardware evidence exists.
+- Expanded contextual controls require complete Windows UI Automation child nodes, keyboard focus order, and screen-reader acceptance.
+- Exclusive fullscreen, HDR, multi-monitor overlay compatibility and additional apps remain untested.
+- Installer/signing/updater, crash diagnostics, and startup distribution decisions remain open.
+
+CI green means compilable and targeted unit tests pass, **not** production acceptance.
+
 ## M3 — General-user utilities (native focus, volume HUD, file shelf)
 
 Branch: `feat/m3-general-utilities` (stacked on M2, M1 and M0). **This is an experimental build, not a completed Windows release.**
