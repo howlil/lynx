@@ -1,4 +1,4 @@
-#include "../core/island_core.hpp"
+#include "../core/activity_coordinator.hpp"
 
 #include <windows.h>
 #include <objbase.h>
@@ -34,10 +34,11 @@ struct App {
     HWND hwnd = nullptr;
     ULONG_PTR gdiplus = 0;
     lynx::Placement placement = lynx::Placement::Floating;
-    lynx::Presentation presentation;
+    lynx::ActivityCoordinator activities;
     lynx::Spring width{232}, height{42}, shoulder{0}, offset{13};
     bool reduced = false;
-    bool demoMedia = false;
+    std::uint64_t demoRevision = 0;
+    std::uint64_t transientToken = 0;
     bool hiddenByDemo = false;
     HWND priorFocus = nullptr;
     int dpi = 96;
@@ -82,7 +83,7 @@ void timerAtMinuteBoundary() {
 }
 
 void setTargets() {
-    const auto geo = lynx::target(g.placement, g.presentation.view());
+    const auto geo = lynx::target(g.placement, g.activities.view());
     if (g.reduced) {
         g.width.snap(geo.width);
         g.height.snap(geo.height);
@@ -94,7 +95,7 @@ void setTargets() {
         g.shoulder.retarget(geo.shoulder);
         g.offset.retarget(geo.topOffset);
     }
-    if (g.presentation.view() == lynx::View::Hidden) {
+    if (g.activities.view() == lynx::View::Hidden) {
         KillTimer(g.hwnd, kAnimationTimer);
         ShowWindow(g.hwnd, SW_HIDE);
         return;
@@ -147,7 +148,7 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
 }
 
 bool drawFrame() {
-    if (g.presentation.view() == lynx::View::Hidden) return true;
+    if (g.activities.view() == lynx::View::Hidden) return true;
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
     const float canvasWidthDip = std::ceil(g.width.value()) + 4.0f;
@@ -205,7 +206,7 @@ bool drawFrame() {
 
             const float contentLeft = x + shoulder + 17.0f;
             const float contentRight = x + w - shoulder - 16.0f;
-            const auto currentView = g.presentation.view();
+            const auto currentView = g.activities.view();
 
             if (currentView == lynx::View::Ambient || currentView == lynx::View::Expanded) {
                 SYSTEMTIME now{};
@@ -244,11 +245,12 @@ bool drawFrame() {
                     }
                 }
                 if (currentView == lynx::View::Expanded) {
+                    const auto selected = g.activities.primary();
                     Pen divider(Color(255,40,40,45),1.0f);
                     graphics.DrawLine(&divider,x+20,y+48,x+w-20,y+48);
-                    label(graphics,L"LYNX  /  NATIVE SHELL M0",13,x+23,y+64,
+                    label(graphics,selected ? selected->title : L"LYNX  /  NATIVE SHELL",13,x+23,y+64,
                           Color(255,245,245,247),true);
-                    label(graphics,L"Ambient clock and power are live Windows data.",12,
+                    label(graphics,selected ? selected->subtitle : L"Ambient clock and power are live Windows data.",12,
                           x+23,y+94,Color(255,164,164,170));
                     label(graphics,L"Click to collapse  |  Right-click for scenarios",11,
                           x+23,y+120,Color(255,140,140,148));
@@ -258,12 +260,15 @@ bool drawFrame() {
             } else if (currentView == lynx::View::Compact) {
                 SolidBrush cover(Color(255,68,97,165));
                 graphics.FillEllipse(&cover,x+shoulder+10.0f,y+8.0f,26.0f,26.0f);
-                label(graphics,L"Now playing",12,x+shoulder+46,y+10,
-                      Color(255,245,245,247),true);
-                label(graphics,L"Demo",10,contentRight-36,y+13,
-                      Color(255,164,164,170));
+                const auto selected = g.activities.primary();
+                label(graphics,selected ? selected->title : L"Activity",12,
+                      x+shoulder+46,y+10,Color(255,245,245,247),true);
+                if (g.activities.secondary()) {
+                    SolidBrush indicator(Color(255,10,132,255));
+                    graphics.FillEllipse(&indicator,contentRight-6.0f,y+17.0f,6.0f,6.0f);
+                }
             } else if (currentView == lynx::View::Transient) {
-                label(graphics,L"Power connected",13,contentLeft,y+15,
+                label(graphics,g.activities.transientText(),13,contentLeft,y+15,
                       Color(255,48,209,88),true);
             }
         }
@@ -310,7 +315,8 @@ void refresh() { setTargets(); drawFrame(); }
 void setExpanded(bool wantExpanded) {
     if (wantExpanded) {
         g.priorFocus = GetForegroundWindow();
-        g.presentation.expand();
+        g.activities.expand();
+        if (g.activities.view() != lynx::View::Expanded) return;
         // Intentional expansion may become keyboard-active; passive compact does not.
         auto style = GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style & ~WS_EX_NOACTIVATE);
@@ -318,7 +324,7 @@ void setExpanded(bool wantExpanded) {
         SetForegroundWindow(g.hwnd);
         SetFocus(g.hwnd);
     } else {
-        g.presentation.collapse();
+        g.activities.collapse();
         const auto style = GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
         refresh();
@@ -327,7 +333,7 @@ void setExpanded(bool wantExpanded) {
     }
 }
 
-void toggleExpanded() { setExpanded(g.presentation.view() != lynx::View::Expanded); }
+void toggleExpanded() { setExpanded(g.activities.view() != lynx::View::Expanded); }
 
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
@@ -358,29 +364,35 @@ void menu(HWND hwnd) {
     PostMessageW(hwnd,WM_NULL,0,0);
     switch (command) {
         case kShowHere:
-            if (g.presentation.fullscreen()) g.presentation.setFullscreen(false);
+            if (g.activities.fullscreen()) g.activities.setFullscreen(false);
             g.hiddenByDemo = false;
             g.chosenMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
-            if (g.presentation.view() == lynx::View::Hidden) g.presentation.ambient();
             diagnostic("show-on-this-monitor");
             break;
         case kFloating: g.placement=lynx::Placement::Floating; break;
         case kAttached: g.placement=lynx::Placement::Attached; break;
-        case kAmbient: g.demoMedia=false; g.presentation.ambient(); break;
-        case kMediaDemo: g.demoMedia=true; g.presentation.compact(); break;
+        case kAmbient:
+            g.activities.collapse();
+            g.activities.end(1,1,++g.demoRevision);
+            break;
+        case kMediaDemo:
+            g.activities.collapse();
+            g.activities.upsert(lynx::Activity{1,1,++g.demoRevision,10,
+                  L"Now playing",L"Demo activity source",true});
+            break;
         case kTransientDemo:
-            g.presentation.transient();
-            SetTimer(hwnd,kTransientTimer,2800,nullptr);
+            g.transientToken=g.activities.transient(L"Power connected");
+            if (g.transientToken) SetTimer(hwnd,kTransientTimer,2800,nullptr);
             break;
         case kReducedMotion: g.reduced=!g.reduced; break;
         case kFullscreenDemo:
             g.hiddenByDemo=!g.hiddenByDemo;
-            g.presentation.setFullscreen(g.hiddenByDemo);
+            g.activities.setFullscreen(g.hiddenByDemo);
             break;
         case kQuit: DestroyWindow(hwnd); return;
         default: return;
     }
-    if (g.presentation.view() != lynx::View::Expanded) {
+    if (g.activities.view() != lynx::View::Expanded) {
         const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
         HWND restore=g.priorFocus ? g.priorFocus : beforeMenuFocus;
@@ -422,7 +434,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         }
         case WM_MOUSEACTIVATE:
-            if (g.presentation.view() != lynx::View::Expanded) return MA_NOACTIVATE;
+            if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
         case WM_LBUTTONUP:
             toggleExpanded();
@@ -434,7 +446,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (wp==kHotkeyId) toggleExpanded();
             return 0;
         case WM_KEYDOWN:
-            if (wp==VK_ESCAPE && g.presentation.view()==lynx::View::Expanded) {
+            if (wp==VK_ESCAPE && g.activities.view()==lynx::View::Expanded) {
                 setExpanded(false);
                 return 0;
             }
@@ -443,7 +455,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
             if (wp==kTransientTimer) {
                 KillTimer(hwnd,kTransientTimer);
-                g.presentation.expireTransient(); refresh(); return 0;
+                g.activities.expireTransient(g.transientToken); refresh(); return 0;
             }
             if (wp==kAnimationTimer) {
                 const ULONGLONG now=GetTickCount64();
