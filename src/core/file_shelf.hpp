@@ -30,13 +30,22 @@ public:
         return std::filesystem::path(files_.front()).filename().wstring();
     }
     bool reconcile(ActivityCoordinator& coordinator) {
-        if(files_.empty())return coordinator.end(kId,generation_,++revision_);
+        if(files_.empty()) {
+            if(!published_)return false;
+            const bool ended=coordinator.end(kId,generation_,++revision_);
+            published_=false;
+            ++generation_; // later shelf contents must not reuse completed generation
+            revision_=0;
+            return ended;
+        }
         const auto count=std::to_wstring(files_.size());
-        return coordinator.upsert(Activity{kId,generation_,++revision_,15,
+        published_=coordinator.upsert(Activity{kId,generation_,++revision_,15,
             L"File shelf · "+count, firstName(),true});
+        return published_;
     }
 private:
     std::vector<std::wstring> files_;
     std::uint64_t generation_=1,revision_=0;
+    bool published_=false;
 };
 } // namespace lynx
