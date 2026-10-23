@@ -1,6 +1,7 @@
 #include "../src/core/media_activity.hpp"
 #include "../src/core/focus_timer.hpp"
 #include "../src/core/file_shelf.hpp"
+#include "../src/core/fullscreen_policy.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -204,6 +205,17 @@ int main() {
     assert(combined.transient(L"Muted")==0);
     combined.collapse();
     assert(combined.primary()->id==FocusTimer::kId);
+
+    // Fullscreen test uses physical monitor bounds: maximize-to-workarea must
+    // not suppress LYNX; exact fullscreen and overscan should.
+    const ScreenRect display{0,0,1920,1080};
+    assert(coversMonitor({0,0,1920,1080},display));
+    assert(coversMonitor({-1,-1,1921,1081},display));
+    assert(!coversMonitor({0,0,1920,1040},display)); // maximized + taskbar
+    assert(!coversMonitor({0,0,1914,1080},display));
+    assert(!coversMonitor({1920,0,3840,1080},display)); // second monitor
+    assert(!coversMonitor({0,0,0,0},display)); // invalid rect
+    assert(coversMonitor({1920,0,3840,1080},{1920,0,3840,1080}));
 
     std::cout << "lynx core: geometry, lifecycle, media, timer and shelf PASS\n";
 }
