@@ -483,9 +483,15 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     HANDLE singleton=CreateMutexW(nullptr,TRUE,L"Local\\LYNX_M0_SINGLE_INSTANCE");
-    if (!singleton || GetLastError()==ERROR_ALREADY_EXISTS) {
+    const DWORD instanceError = singleton ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+    if (!singleton || instanceError == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(nullptr,
+            instanceError == ERROR_ALREADY_EXISTS
+              ? L"LYNX M0 is already running.\\nClose the old instance from the system tray or Task Manager before launching this build."
+              : L"LYNX M0 could not create its single-instance mutex.",
+            L"LYNX M0",MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
         if (singleton) CloseHandle(singleton);
-        return 0;
+        return instanceError == ERROR_ALREADY_EXISTS ? 0 : 5;
     }
     GdiplusStartupInput startup{};
     if (GdiplusStartup(&g.gdiplus,&startup,nullptr)!=Ok) {
