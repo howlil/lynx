@@ -7,6 +7,7 @@
 #include <objidl.h>
 #include <oleauto.h>
 #include <shellapi.h>
+#include <windowsx.h>
 #include <gdiplus.h>
 #include <UIAutomation.h>
 #include <atomic>
@@ -386,8 +387,19 @@ bool drawFrame() {
                     graphics.DrawLine(&divider,x+20,y+48,x+w-20,y+48);
                     label(graphics,selected ? selected->title : L"LYNX  /  NATIVE SHELL",13,x+23,y+64,
                           Color(255,245,245,247),true);
-                    label(graphics,selected ? selected->subtitle : L"Ambient clock and power are live Windows data.",12,
+                    label(graphics,selected ? selected->subtitle :
+                          (g.mediaSnapshot.error.empty() ? L"Ambient clock and power are live Windows data." :
+                           L"Media unavailable - see log / permissions"),12,
                           x+23,y+94,Color(255,164,164,170));
+                    if (selected && selected->id==lynx::MediaActivityBridge::kId &&
+                        g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
+                        GraphicsPath action;
+                        rounded(action,x+w-85.0f,y+125.0f,63.0f,31.0f,13.0f);
+                        SolidBrush buttonBrush(Color(255,39,39,44));
+                        graphics.FillPath(&buttonBrush,&action);
+                        label(graphics,g.mediaSnapshot.playing ? L"Pause" : L"Play",
+                              12,x+w-74.0f,y+130.0f,Color(255,245,245,247),true);
+                    }
                     label(graphics,L"Click to collapse  |  Right-click for scenarios",11,
                           x+23,y+120,Color(255,140,140,148));
                     label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
@@ -618,9 +630,25 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case WM_MOUSEACTIVATE:
             if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
-        case WM_LBUTTONUP:
+        case WM_LBUTTONUP: {
+            const auto selected=g.activities.primary();
+            if (g.activities.view()==lynx::View::Expanded &&
+                selected && selected->id==lynx::MediaActivityBridge::kId &&
+                g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
+                const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
+                const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
+                const float contentX=2.0f;
+                const float contentY=g.offset.value();
+                const float width=g.width.value();
+                if (px>=contentX+width-85.0f && px<=contentX+width-22.0f &&
+                    py>=contentY+125.0f && py<=contentY+156.0f) {
+                    if (g.mediaProvider) g.mediaProvider->togglePlayPause();
+                    return 0;
+                }
+            }
             toggleExpanded();
             return 0;
+        }
         case WM_RBUTTONUP:
             menu(hwnd);
             return 0;
@@ -634,6 +662,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             std::unique_ptr<lynx::MediaSnapshot> media(
                  reinterpret_cast<lynx::MediaSnapshot*>(lp));
             if (!media) return 0;
+            if (!media->error.empty()) diagnostic("GSMTC unavailable");
             const auto previousView=g.activities.view();
             const auto oldSource=g.mediaSnapshot.source;
             const auto oldAvailable=g.mediaSnapshot.available;
@@ -656,10 +685,20 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_KEYDOWN:
-            if (g.activities.view()==lynx::View::Expanded &&
-                (wp==VK_ESCAPE || wp==VK_RETURN || wp==VK_SPACE)) {
-                setExpanded(false);
-                return 0;
+            if (g.activities.view()==lynx::View::Expanded) {
+                if (wp==VK_SPACE) {
+                    const auto selected=g.activities.primary();
+                    if (selected && selected->id==lynx::MediaActivityBridge::kId &&
+                        g.mediaSnapshot.available && g.mediaSnapshot.canToggle &&
+                        g.mediaProvider) {
+                        g.mediaProvider->togglePlayPause();
+                        return 0;
+                    }
+                }
+                if (wp==VK_ESCAPE || wp==VK_RETURN || wp==VK_SPACE) {
+                    setExpanded(false);
+                    return 0;
+                }
             }
             break;
         case WM_TIMER:
