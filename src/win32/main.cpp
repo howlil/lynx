@@ -31,7 +31,7 @@ constexpr float kCanvasHeightDip = 260.0f;
 
 enum MenuId : UINT {
     kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
-    kTransientDemo, kReducedMotion, kFullscreenDemo, kQuit
+    kTimerDemo, kTransientDemo, kReducedMotion, kFullscreenDemo, kQuit
 };
 
 struct App {
@@ -42,6 +42,7 @@ struct App {
     lynx::Spring width{232}, height{42}, shoulder{0}, offset{13};
     bool reduced = false;
     std::uint64_t demoRevision = 0;
+    std::uint64_t timerRevision = 0;
     std::uint64_t transientToken = 0;
     bool hiddenByDemo = false;
     HWND priorFocus = nullptr;
@@ -448,8 +449,9 @@ void menu(HWND hwnd) {
     AppendMenuW(popup, MF_STRING | (g.placement==lynx::Placement::Attached?MF_CHECKED:0),
                 kAttached,L"Top-attached");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
-    AppendMenuW(popup,MF_STRING,kAmbient,L"Ambient (live clock / battery)");
-    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Simulate compact media");
+    AppendMenuW(popup,MF_STRING,kAmbient,L"Clear simulated activities");
+    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Start / update simulated media");
+    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Start / update simulated focus timer");
     AppendMenuW(popup,MF_STRING,kTransientDemo,L"Simulate transient charging");
     AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
                 kReducedMotion,L"Reduced motion");
@@ -477,11 +479,15 @@ void menu(HWND hwnd) {
         case kAmbient:
             g.activities.collapse();
             g.activities.end(1,1,++g.demoRevision);
+            g.activities.end(2,1,++g.timerRevision);
             break;
         case kMediaDemo:
-            g.activities.collapse();
             g.activities.upsert(lynx::Activity{1,1,++g.demoRevision,10,
                   L"Now playing",L"Demo activity source",true});
+            break;
+        case kTimerDemo:
+            g.activities.upsert(lynx::Activity{2,1,++g.timerRevision,20,
+                  L"Focus timer",L"25:00  /  Demo in progress",true});
             break;
         case kTransientDemo:
             g.transientToken=g.activities.transient(L"Power connected");
