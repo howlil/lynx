@@ -181,7 +181,29 @@ void syncAccessibleState() {
         state.actions[index]={action->action,std::wstring(action->name),
                               RECT{x,yy,xx,bottom}};
     }
+    const auto before=g.uiaProvider->snapshot();
+    const bool changed=before.count!=state.count ||
+        before.ownerId!=state.ownerId ||
+        before.ownerGeneration!=state.ownerGeneration;
     g.uiaProvider->update(std::move(state));
+    if(changed) {
+        (void)UiaRaiseStructureChangedEvent(
+            static_cast<IRawElementProviderSimple*>(g.uiaProvider),
+            StructureChangeType_ChildrenInvalidated,nullptr,0);
+    }
+}
+
+void announceAccessibleFocus() {
+    if(!g.uiaProvider || g.focusedAction<0)return;
+    IRawElementProviderFragment* element=nullptr;
+    if(FAILED(g.uiaProvider->GetFocus(&element)) || !element)return;
+    IRawElementProviderSimple* simple=nullptr;
+    if(SUCCEEDED(element->QueryInterface(__uuidof(IRawElementProviderSimple),
+            reinterpret_cast<void**>(&simple))) && simple) {
+        (void)UiaRaiseAutomationEvent(simple,UIA_AutomationFocusChangedEventId);
+        simple->Release();
+    }
+    element->Release();
 }
 
 void readPower() {
@@ -932,6 +954,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     SetForegroundWindow(hwnd); // only explicit UIA focus request
                     SetFocus(hwnd);
                     refresh();
+                    announceAccessibleFocus();
                 }
             }
             return 0;
@@ -1009,6 +1032,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                          (g.focusedAction+actions.count-1)%actions.count) :
                         (g.focusedAction+1)%actions.count;
                     refresh();
+                    announceAccessibleFocus();
                     return 0;
                 }
                 if((wp==VK_RETURN || wp==VK_SPACE) && actions.count>0) {
