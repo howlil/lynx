@@ -1101,6 +1101,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
                     showTransient(L"File added",1800);
                     refresh();
                 }
+                return added; // reject duplicate/full/unavailable drops
             });
         if(g.dropTarget) {
             const HRESULT registered=RegisterDragDrop(hwnd,g.dropTarget);
