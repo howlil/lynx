@@ -292,6 +292,7 @@ void menu(HWND hwnd) {
                 g.hiddenByDemo?L"Restore from hidden":L"Simulate fullscreen hide");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING,kQuit,L"Quit LYNX M0");
+    HWND beforeMenuFocus = GetForegroundWindow();
     POINT pt{};
     GetCursorPos(&pt);
     SetForegroundWindow(hwnd);
@@ -315,6 +316,13 @@ void menu(HWND hwnd) {
             break;
         case kQuit: DestroyWindow(hwnd); return;
         default: return;
+    }
+    if (g.presentation.view() != lynx::View::Expanded) {
+        const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
+        HWND restore=g.priorFocus ? g.priorFocus : beforeMenuFocus;
+        if (restore && restore!=hwnd && IsWindow(restore)) SetForegroundWindow(restore);
+        g.priorFocus=nullptr;
     }
     refresh();
 }
