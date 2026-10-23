@@ -533,6 +533,54 @@ void setExpanded(bool wantExpanded) {
 
 void toggleExpanded() { setExpanded(g.activities.view() != lynx::View::Expanded); }
 
+void openActivity(std::uint32_t id) {
+    if(g.activities.view()!=lynx::View::Expanded) setExpanded(true);
+    if(g.activities.select(id)) refresh();
+}
+void startFocus(int seconds) {
+    const auto now=GetTickCount64();
+    g.focus.start(seconds,now);
+    g.focus.publish(g.activities,now);
+    SetTimer(g.hwnd,kFocusTimer,1000,nullptr);
+    openActivity(lynx::FocusTimer::kId);
+    refresh();
+}
+void toggleFocus() {
+    const auto now=GetTickCount64();
+    if(g.focus.state()==lynx::FocusTimer::State::Ready ||
+       g.focus.state()==lynx::FocusTimer::State::Completed) {
+        startFocus(25*60);
+        return;
+    }
+    if(g.focus.state()==lynx::FocusTimer::State::Running) {
+        g.focus.pause(now);
+        KillTimer(g.hwnd,kFocusTimer);
+    } else if(g.focus.resume(now)) {
+        SetTimer(g.hwnd,kFocusTimer,1000,nullptr);
+    }
+    g.focus.publish(g.activities,now);
+    refresh();
+}
+void resetFocus() {
+    KillTimer(g.hwnd,kFocusTimer);
+    g.focus.reset();
+    g.focus.publish(g.activities,GetTickCount64());
+    refresh();
+}
+void revealFirstFile() {
+    const auto path=g.shelf.firstPath();
+    if(path.empty())return;
+    PIDLIST_ABSOLUTE file=nullptr;
+    if(FAILED(SHParseDisplayName(path.c_str(),nullptr,&file,0,nullptr)) || !file)return;
+    PIDLIST_ABSOLUTE folder=ILCloneFull(file);
+    if(folder && ILRemoveLastID(folder)) {
+        const PCUITEMID_CHILD child=ILFindLastID(file);
+        (void)SHOpenFolderAndSelectItems(folder,1,&child,0);
+    }
+    if(folder)CoTaskMemFree(folder);
+    CoTaskMemFree(file);
+}
+
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
@@ -545,7 +593,21 @@ void menu(HWND hwnd) {
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING,kAmbient,L"Clear simulated activities");
     AppendMenuW(popup,MF_STRING,kMediaDemo,L"Start / update simulated media");
-    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Start / update simulated focus timer");
+    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Simulate focus activity (legacy)");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING,kFocus25,L"Start Focus · 25 min");
+    AppendMenuW(popup,MF_STRING,kFocus5,L"Start Focus · 5 min");
+    AppendMenuW(popup,MF_STRING | (
+        g.focus.state()==lynx::FocusTimer::State::Running ||
+        g.focus.state()==lynx::FocusTimer::State::Paused?MF_ENABLED:MF_GRAYED),
+        kFocusPause,g.focus.state()==lynx::FocusTimer::State::Running?
+        L"Pause Focus":L"Resume Focus");
+    AppendMenuW(popup,MF_STRING,kFocusReset,L"Reset Focus");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING | (g.shelf.files().empty()?MF_GRAYED:MF_ENABLED),
+        kShelfOpen,L"Show File Shelf");
+    AppendMenuW(popup,MF_STRING | (g.shelf.files().empty()?MF_GRAYED:MF_ENABLED),
+        kShelfClear,L"Clear File Shelf");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING |
                 ((g.mediaSnapshot.available && g.mediaSnapshot.canToggle)?MF_ENABLED:MF_GRAYED),
@@ -596,12 +658,17 @@ void menu(HWND hwnd) {
             g.activities.upsert(lynx::Activity{2,1,++g.timerRevision,20,
                   L"Focus timer",L"25:00  /  Demo in progress",true});
             break;
+        case kFocus25: startFocus(25*60); break;
+        case kFocus5: startFocus(5*60); break;
+        case kFocusPause: toggleFocus(); break;
+        case kFocusReset: resetFocus(); break;
+        case kShelfOpen: openActivity(lynx::FileShelf::kId); break;
+        case kShelfClear:
+            g.shelf.clear();
+            g.shelf.reconcile(g.activities);
+            break;
         case kTransientDemo:
-            g.transientToken=g.activities.transient(L"Power connected");
-            if (g.transientToken) {
-                g.transientDeadline=GetTickCount64()+2800;
-                SetTimer(hwnd,kTransientTimer,2800,nullptr);
-            }
+            showTransient(L"Power connected",2800);
             break;
         case kToggleMedia:
             if (g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
@@ -806,11 +873,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     const bool chargingChanged=known && g.powerKnown &&
                         previous.ACLineStatus != g.power.ACLineStatus;
                     if (chargingChanged && g.power.ACLineStatus == 1) {
-                        g.transientToken=g.activities.transient(L"Power connected");
-                        if (g.transientToken) {
-                            g.transientDeadline=GetTickCount64()+2800;
-                            SetTimer(hwnd,kTransientTimer,2800,nullptr);
-                        }
+                        showTransient(L"Power connected",2800);
                     }
                     refresh();
                 }
