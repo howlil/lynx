@@ -597,7 +597,7 @@ void revealFirstFile() {
     if(FAILED(SHParseDisplayName(path.c_str(),nullptr,&file,0,nullptr)) || !file)return;
     PIDLIST_ABSOLUTE folder=ILCloneFull(file);
     if(folder && ILRemoveLastID(folder)) {
-        const PCUITEMID_CHILD child=ILFindLastID(file);
+        PCUITEMID_CHILD child=ILFindLastID(file);
         (void)SHOpenFolderAndSelectItems(folder,1,&child,0);
     }
     if(folder)CoTaskMemFree(folder);
