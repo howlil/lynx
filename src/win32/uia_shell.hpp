@@ -287,12 +287,19 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetRuntimeId(SAFEARRAY** result) override {
         if(!result)return E_POINTER;
-        *result=SafeArrayCreateVector(VT_I4,0,2);
+        *result=SafeArrayCreateVector(VT_I4,0,5);
         if(!*result)return E_OUTOFMEMORY;
-        LONG first=0,second=1;
-        int tag=UiaAppendRuntimeId,number=index_+1;
-        HRESULT hr=SafeArrayPutElement(*result,&first,&tag);
-        if(SUCCEEDED(hr))hr=SafeArrayPutElement(*result,&second,&number);
+        const int runtime[5]={
+            UiaAppendRuntimeId,index_+1,static_cast<int>(ownerId_),
+            static_cast<int>(ownerGeneration_ & 0xffffffffull),
+            static_cast<int>((ownerGeneration_ >> 32) & 0xffffffffull)
+        };
+        HRESULT hr=S_OK;
+        for(LONG i=0;i<5;i++) {
+            int value=runtime[i];
+            hr=SafeArrayPutElement(*result,&i,&value);
+            if(FAILED(hr))break;
+        }
         if(FAILED(hr)){SafeArrayDestroy(*result);*result=nullptr;}
         return hr;
     }
