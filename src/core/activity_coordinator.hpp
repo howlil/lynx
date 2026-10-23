@@ -37,7 +37,8 @@ public:
         if (!next.id || !next.generation || !next.revision) return false;
         const auto it = activities_.find(next.id);
         if (it != activities_.end() &&
-            !isNewer(next, it->second)) return false;
+            ((!it->second.active && next.generation == it->second.generation) ||
+             !isNewer(next, it->second))) return false;
         next.active = true;
         activities_[next.id] = std::move(next);
         return true;
