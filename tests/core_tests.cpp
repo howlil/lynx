@@ -1,4 +1,6 @@
 #include "../src/core/media_activity.hpp"
+#include "../src/core/focus_timer.hpp"
+#include "../src/core/file_shelf.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -125,5 +127,83 @@ int main() {
     assert(mediaBridge.generation()>secondGeneration);
     assert(mediaCoordinator.primary()->title==L"Podcast");
 
-    std::cout << "lynx core: geometry, spring, lifecycle and media bridge PASS\n";
+    // Fully deterministic timer: no sleeping test, clock supplied explicitly.
+    ActivityCoordinator focusCoordinator;
+    FocusTimer focus;
+    assert(focus.state()==FocusTimer::State::Ready);
+    focus.start(25*60,1000);
+    assert(focus.remainingSeconds(1000)==1500);
+    assert(focus.publish(focusCoordinator,1000));
+    assert(focusCoordinator.primary()->id==FocusTimer::kId);
+    assert(focus.remainingSeconds(1501)==1500);
+    assert(focus.remainingSeconds(2000)==1499);
+    assert(focus.pause(31'000));
+    assert(focus.state()==FocusTimer::State::Paused);
+    assert(focus.remainingSeconds(5'000'000)==1470);
+    assert(focus.resume(7'000'000));
+    assert(focus.remainingSeconds(7'000'000)==1470);
+    assert(!focus.advance(8'469'999));
+    assert(focus.advance(8'470'000));
+    assert(!focus.advance(8'470'100)); // completion exactly once
+    assert(focus.publish(focusCoordinator,8'470'000));
+    assert(focusCoordinator.view()==View::Ambient);
+    focus.start(60,20'000'000);
+    assert(focus.publish(focusCoordinator,20'000'000));
+    assert(focusCoordinator.primary()->title==L"1:00");
+    focus.reset();
+    assert(focus.publish(focusCoordinator,20'000'000));
+    assert(focusCoordinator.view()==View::Ambient);
+    // If a user clicks Pause just after the deadline, the timer reaches
+    // Completed without waiting for a potentially delayed WM_TIMER.
+    focus.start(5,30'000'000);
+    assert(focus.publish(focusCoordinator,30'000'000));
+    assert(focus.pause(30'005'000));
+    assert(focus.state()==FocusTimer::State::Completed);
+    assert(focus.publish(focusCoordinator,30'005'000));
+    assert(focusCoordinator.view()==View::Ambient);
+
+    // Shelf paths are references, not copies; duplicate and over-limit refused.
+    FileShelf shelf;
+    ActivityCoordinator shelfCoordinator;
+    assert(shelf.add(L"/documents/report.pdf"));
+    assert(!shelf.add(L"/documents/report.pdf"));
+    assert(shelf.add(L"/documents/budget.xlsx"));
+    assert(shelf.reconcile(shelfCoordinator));
+    assert(shelfCoordinator.primary()->id==FileShelf::kId);
+    assert(shelf.files().size()==2);
+    assert(shelf.firstName()==L"report.pdf");
+    assert(!shelf.remove(5));
+    assert(shelf.remove(0));
+    assert(shelf.reconcile(shelfCoordinator));
+    assert(shelf.firstName()==L"budget.xlsx");
+    shelf.clear();
+    assert(shelf.reconcile(shelfCoordinator));
+    assert(shelfCoordinator.view()==View::Ambient);
+    assert(shelf.add(L"/new/again.txt"));
+    assert(shelf.reconcile(shelfCoordinator));
+    assert(shelfCoordinator.primary()->id==FileShelf::kId);
+    shelf.clear(); shelf.reconcile(shelfCoordinator);
+    for(int i=0;i<static_cast<int>(FileShelf::kLimit);++i)
+        assert(shelf.add(L"/sample/"+std::to_wstring(i)));
+    assert(!shelf.add(L"/sample/overflow"));
+
+    // User-chosen shelf must stay selected even when timer/media has higher priority.
+    ActivityCoordinator combined;
+    FocusTimer selectedFocus;
+    selectedFocus.start(300,3000);
+    assert(selectedFocus.publish(combined,3000));
+    FileShelf selectedShelf;
+    assert(selectedShelf.add(L"/inbox/notes.txt"));
+    assert(selectedShelf.reconcile(combined));
+    assert(combined.primary()->id==FocusTimer::kId);
+    assert(combined.select(FileShelf::kId));
+    assert(combined.view()==View::Expanded);
+    assert(combined.primary()->id==FileShelf::kId);
+    assert(!combined.select(99999));
+    assert(combined.primary()->id==FileShelf::kId);
+    assert(combined.transient(L"Muted")==0);
+    combined.collapse();
+    assert(combined.primary()->id==FocusTimer::kId);
+
+    std::cout << "lynx core: geometry, lifecycle, media, timer and shelf PASS\n";
 }

@@ -1,4 +1,8 @@
 #include "../core/media_activity.hpp"
+#include "../core/focus_timer.hpp"
+#include "../core/file_shelf.hpp"
+#include "volume_feedback.hpp"
+#include "file_drop_target.hpp"
 #include "media_provider.hpp"
 #include "settings_store.hpp"
 
@@ -7,6 +11,7 @@
 #include <objidl.h>
 #include <oleauto.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <UIAutomation.h>
@@ -28,9 +33,11 @@ namespace {
 constexpr UINT_PTR kAnimationTimer = 101;
 constexpr UINT_PTR kClockTimer = 102;
 constexpr UINT_PTR kTransientTimer = 103;
+constexpr UINT_PTR kFocusTimer = 104;
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kMediaMessage = WM_APP + 3;
+constexpr UINT kVolumeMessage = WM_APP + 4;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
 constexpr float kCanvasWidthDip = 440.0f;
@@ -38,7 +45,8 @@ constexpr float kCanvasHeightDip = 260.0f;
 
 enum MenuId : UINT {
     kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
-    kTimerDemo, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit
+    kTimerDemo, kFocus5, kFocus25, kFocusPause, kFocusReset,
+    kShelfOpen, kShelfClear, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit
 };
 
 struct App {
@@ -50,6 +58,13 @@ struct App {
     bool reduced = false;
     std::uint64_t demoRevision = 0;
     std::uint64_t timerRevision = 0;
+    lynx::FocusTimer focus;
+    lynx::FileShelf shelf;
+    lynx::FileDropTarget* dropTarget = nullptr;
+    bool dropRegistered = false;
+    std::unique_ptr<lynx::WindowsVolumeFeedback> volume;
+    lynx::WindowsVolumeFeedback::Status volumeState{};
+    bool volumeInitialized = false;
     std::uint64_t transientToken = 0;
     ULONGLONG transientDeadline = 0;
     bool hiddenByDemo = false;
@@ -212,6 +227,46 @@ void onMediaSnapshot(lynx::MediaSnapshot next) {
     g.mediaSnapshot=std::move(next);
 }
 
+void refresh();
+void setExpanded(bool wantExpanded);
+
+void showTransient(const std::wstring& text,UINT duration=2600) {
+    g.transientToken=g.activities.transient(text);
+    if(!g.transientToken)return;
+    g.transientDeadline=GetTickCount64()+duration;
+    SetTimer(g.hwnd,kTransientTimer,duration,nullptr);
+}
+
+void timerFocusTick() {
+    const auto now=GetTickCount64();
+    if(g.focus.state()!=lynx::FocusTimer::State::Running) {
+        KillTimer(g.hwnd,kFocusTimer);
+        return;
+    }
+    if(g.focus.advance(now)) {
+        const auto selected=g.activities.primary();
+        const bool ownExpanded=g.activities.expanded() &&
+              selected && selected->id==lynx::FocusTimer::kId;
+        if(ownExpanded) setExpanded(false); // terminal result may dismiss its own panel
+        KillTimer(g.hwnd,kFocusTimer);
+        g.focus.publish(g.activities,now);
+        showTransient(L"Focus complete",3600);
+        refresh();
+        return;
+    }
+    const auto selected=g.activities.primary();
+    const int remaining=g.focus.remainingSeconds(now);
+    const auto newTitle=lynx::FocusTimer::clock(remaining);
+    // Do not repaint the entire window for multiple timer callbacks per second.
+    const bool visibleTimer = selected && selected->id==lynx::FocusTimer::kId;
+    if(visibleTimer && (selected->title!=newTitle || g.activities.expanded())) {
+        g.focus.publish(g.activities,now);
+        refresh();
+    } else if(!visibleTimer) {
+        g.focus.publish(g.activities,now); // keep state current, without repaint
+    }
+}
+
 void timerAtMinuteBoundary() {
     SYSTEMTIME now{};
     GetLocalTime(&now);
@@ -340,6 +395,8 @@ bool drawFrame() {
             else rounded(shape,x,y,w,h,std::min(h*.5f,22.0f));
             SolidBrush background(Color(255,0,0,0));
             graphics.FillPath(&background,&shape);
+            // All content stays within the interpolated shape while expanding.
+            graphics.SetClip(&shape);
 
             const float contentLeft = x + shoulder + 17.0f;
             const float contentRight = x + w - shoulder - 16.0f;
@@ -391,7 +448,26 @@ bool drawFrame() {
                           (g.mediaSnapshot.error.empty() ? L"Ambient clock and power are live Windows data." :
                            L"Media unavailable - see log / permissions"),12,
                           x+23,y+94,Color(255,164,164,170));
-                    if (selected && selected->id==lynx::MediaActivityBridge::kId &&
+                    if (selected && selected->id==lynx::FocusTimer::kId) {
+                        GraphicsPath pauseButton,resetButton;
+                        rounded(pauseButton,x+w-168.0f,y+125.0f,72.0f,31.0f,13.0f);
+                        rounded(resetButton,x+w-88.0f,y+125.0f,66.0f,31.0f,13.0f);
+                        SolidBrush buttonBrush(Color(255,39,39,44));
+                        graphics.FillPath(&buttonBrush,&pauseButton);
+                        graphics.FillPath(&buttonBrush,&resetButton);
+                        label(graphics,g.focus.state()==lynx::FocusTimer::State::Running?
+                            L"Pause":L"Resume",11,x+w-155.0f,y+130.0f,Color(255,245,245,247),true);
+                        label(graphics,L"Reset",11,x+w-77.0f,y+130.0f,Color(255,245,245,247),true);
+                    } else if (selected && selected->id==lynx::FileShelf::kId) {
+                        GraphicsPath openButton,clearButton;
+                        rounded(openButton,x+w-168.0f,y+125.0f,72.0f,31.0f,13.0f);
+                        rounded(clearButton,x+w-88.0f,y+125.0f,66.0f,31.0f,13.0f);
+                        SolidBrush buttonBrush(Color(255,39,39,44));
+                        graphics.FillPath(&buttonBrush,&openButton);
+                        graphics.FillPath(&buttonBrush,&clearButton);
+                        label(graphics,L"Reveal",11,x+w-156.0f,y+130.0f,Color(255,245,245,247),true);
+                        label(graphics,L"Clear",11,x+w-76.0f,y+130.0f,Color(255,245,245,247),true);
+                    } else if (selected && selected->id==lynx::MediaActivityBridge::kId &&
                         g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
                         GraphicsPath action;
                         rounded(action,x+w-85.0f,y+125.0f,63.0f,31.0f,13.0f);
@@ -400,8 +476,9 @@ bool drawFrame() {
                         label(graphics,g.mediaSnapshot.playing ? L"Pause" : L"Play",
                               12,x+w-74.0f,y+130.0f,Color(255,245,245,247),true);
                     }
-                    label(graphics,L"Click to collapse  |  Right-click for scenarios",11,
-                          x+23,y+120,Color(255,140,140,148));
+                    if(!selected)
+                        label(graphics,L"Drop files here · Right-click for actions",11,
+                              x+23,y+120,Color(255,140,140,148));
                     label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
                           x+23,y+153,Color(255,115,115,122));
                 }
@@ -419,6 +496,7 @@ bool drawFrame() {
                 label(graphics,g.activities.transientText(),13,contentLeft,y+15,
                       Color(255,48,209,88),true);
             }
+            graphics.ResetClip();
         }
     }
 
@@ -483,6 +561,66 @@ void setExpanded(bool wantExpanded) {
 
 void toggleExpanded() { setExpanded(g.activities.view() != lynx::View::Expanded); }
 
+void openActivity(std::uint32_t id) {
+    if(g.activities.view()!=lynx::View::Expanded) setExpanded(true);
+    if(g.activities.select(id)) refresh();
+}
+void startFocus(int seconds) {
+    const auto now=GetTickCount64();
+    g.focus.start(seconds,now);
+    g.focus.publish(g.activities,now);
+    SetTimer(g.hwnd,kFocusTimer,1000,nullptr);
+    openActivity(lynx::FocusTimer::kId);
+    refresh();
+}
+void toggleFocus() {
+    const auto now=GetTickCount64();
+    if(g.focus.state()==lynx::FocusTimer::State::Ready ||
+       g.focus.state()==lynx::FocusTimer::State::Completed) {
+        startFocus(25*60);
+        return;
+    }
+    if(g.focus.state()==lynx::FocusTimer::State::Running) {
+        const auto selected=g.activities.primary();
+        const bool ownExpanded=g.activities.expanded() && selected &&
+                                 selected->id==lynx::FocusTimer::kId;
+        g.focus.pause(now);
+        KillTimer(g.hwnd,kFocusTimer);
+        // If deadline passed just before the Pause click, WM_TIMER has not
+        // necessarily run yet. Complete through the same terminal path.
+        if(g.focus.state()==lynx::FocusTimer::State::Completed) {
+            if(ownExpanded) setExpanded(false);
+            g.focus.publish(g.activities,now);
+            showTransient(L"Focus complete",3600);
+            refresh();
+            return;
+        }
+    } else if(g.focus.resume(now)) {
+        SetTimer(g.hwnd,kFocusTimer,1000,nullptr);
+    }
+    g.focus.publish(g.activities,now);
+    refresh();
+}
+void resetFocus() {
+    KillTimer(g.hwnd,kFocusTimer);
+    g.focus.reset();
+    g.focus.publish(g.activities,GetTickCount64());
+    refresh();
+}
+void revealFirstFile() {
+    const auto path=g.shelf.firstPath();
+    if(path.empty())return;
+    PIDLIST_ABSOLUTE file=nullptr;
+    if(FAILED(SHParseDisplayName(path.c_str(),nullptr,&file,0,nullptr)) || !file)return;
+    PIDLIST_ABSOLUTE folder=ILCloneFull(file);
+    if(folder && ILRemoveLastID(folder)) {
+        PCUITEMID_CHILD child=ILFindLastID(file);
+        (void)SHOpenFolderAndSelectItems(folder,1,&child,0);
+    }
+    if(folder)CoTaskMemFree(folder);
+    CoTaskMemFree(file);
+}
+
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
@@ -493,21 +631,40 @@ void menu(HWND hwnd) {
     AppendMenuW(popup, MF_STRING | (g.placement==lynx::Placement::Attached?MF_CHECKED:0),
                 kAttached,L"Top-attached");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+#ifdef _DEBUG
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING,kAmbient,L"Clear simulated activities");
-    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Start / update simulated media");
-    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Start / update simulated focus timer");
+    AppendMenuW(popup,MF_STRING,kMediaDemo,L"Simulated media");
+    AppendMenuW(popup,MF_STRING,kTimerDemo,L"Simulated focus");
+#endif
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING,kFocus25,L"Start Focus · 25 min");
+    AppendMenuW(popup,MF_STRING,kFocus5,L"Start Focus · 5 min");
+    AppendMenuW(popup,MF_STRING | (
+        g.focus.state()==lynx::FocusTimer::State::Running ||
+        g.focus.state()==lynx::FocusTimer::State::Paused?MF_ENABLED:MF_GRAYED),
+        kFocusPause,g.focus.state()==lynx::FocusTimer::State::Running?
+        L"Pause Focus":L"Resume Focus");
+    AppendMenuW(popup,MF_STRING,kFocusReset,L"Reset Focus");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING | (g.shelf.files().empty()?MF_GRAYED:MF_ENABLED),
+        kShelfOpen,L"Show File Shelf");
+    AppendMenuW(popup,MF_STRING | (g.shelf.files().empty()?MF_GRAYED:MF_ENABLED),
+        kShelfClear,L"Clear File Shelf");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING |
                 ((g.mediaSnapshot.available && g.mediaSnapshot.canToggle)?MF_ENABLED:MF_GRAYED),
                 kToggleMedia,g.mediaSnapshot.playing?
                   L"Pause current Windows media":L"Play current Windows media");
+#ifdef _DEBUG
     AppendMenuW(popup,MF_STRING,kTransientDemo,L"Simulate transient charging");
-    AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
-                kReducedMotion,L"Reduced motion");
     AppendMenuW(popup,MF_STRING,kFullscreenDemo,
                 g.hiddenByDemo?L"Restore from hidden":L"Simulate fullscreen hide");
+#endif
+    AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
+                kReducedMotion,L"Reduced motion");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
-    AppendMenuW(popup,MF_STRING,kQuit,L"Quit LYNX M0");
+    AppendMenuW(popup,MF_STRING,kQuit,L"Quit LYNX");
     HWND beforeMenuFocus = GetForegroundWindow();
     POINT pt{};
     GetCursorPos(&pt);
@@ -546,12 +703,17 @@ void menu(HWND hwnd) {
             g.activities.upsert(lynx::Activity{2,1,++g.timerRevision,20,
                   L"Focus timer",L"25:00  /  Demo in progress",true});
             break;
+        case kFocus25: startFocus(25*60); break;
+        case kFocus5: startFocus(5*60); break;
+        case kFocusPause: toggleFocus(); break;
+        case kFocusReset: resetFocus(); break;
+        case kShelfOpen: openActivity(lynx::FileShelf::kId); break;
+        case kShelfClear:
+            g.shelf.clear();
+            g.shelf.reconcile(g.activities);
+            break;
         case kTransientDemo:
-            g.transientToken=g.activities.transient(L"Power connected");
-            if (g.transientToken) {
-                g.transientDeadline=GetTickCount64()+2800;
-                SetTimer(hwnd,kTransientTimer,2800,nullptr);
-            }
+            showTransient(L"Power connected",2800);
             break;
         case kToggleMedia:
             if (g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
@@ -569,6 +731,12 @@ void menu(HWND hwnd) {
         case kQuit: DestroyWindow(hwnd); return;
         default: return;
     }
+    // Track the application that was active *before* TrackPopupMenu.
+    // The menu temporarily makes LYNX foreground; setExpanded(true) from
+    // a tray command would otherwise capture LYNX itself as priorFocus.
+    if (g.activities.view() == lynx::View::Expanded &&
+        beforeMenuFocus != hwnd && beforeMenuFocus && IsWindow(beforeMenuFocus))
+        g.priorFocus=beforeMenuFocus;
     if (g.activities.view() != lynx::View::Expanded) {
         const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
@@ -585,7 +753,7 @@ void addTray(HWND hwnd) {
     nid.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;
     nid.uCallbackMessage=kTrayMessage;
     nid.hIcon=LoadIconW(nullptr,IDI_APPLICATION);
-    wcscpy_s(nid.szTip,L"LYNX M0 · Ctrl+Alt+Space");
+    wcscpy_s(nid.szTip,L"LYNX · Ctrl+Alt+Space");
     Shell_NotifyIconW(NIM_ADD,&nid);
 }
 void removeTray(HWND hwnd) {
@@ -646,6 +814,31 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     return 0;
                 }
             }
+            if(g.activities.view()==lynx::View::Expanded && selected) {
+                const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
+                const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
+                const float w=g.width.value(),y=g.offset.value();
+                if(py>=y+125.0f && py<=y+156.0f) {
+                    if(selected->id==lynx::FocusTimer::kId) {
+                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
+                            toggleFocus();return 0;
+                        }
+                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
+                            resetFocus();return 0;
+                        }
+                    }
+                    if(selected->id==lynx::FileShelf::kId) {
+                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
+                            revealFirstFile();return 0;
+                        }
+                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
+                            g.shelf.clear();
+                            g.shelf.reconcile(g.activities);
+                            refresh();return 0;
+                        }
+                    }
+                }
+            }
             toggleExpanded();
             return 0;
         }
@@ -658,6 +851,21 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case kUiInvokeMessage:
             toggleExpanded();
             return 0;
+        case kVolumeMessage: {
+            if(!g.volume)return 0;
+            const auto now=g.volume->read();
+            if(!now.available)return 0;
+            const bool changed=g.volumeInitialized &&
+              (now.percent!=g.volumeState.percent || now.muted!=g.volumeState.muted);
+            g.volumeState=now;
+            g.volumeInitialized=true;
+            if(changed) {
+                showTransient(now.muted?L"Muted":
+                    (L"Volume " + std::to_wstring(now.percent) + L"%"),1450);
+                refresh();
+            }
+            return 0;
+        }
         case kMediaMessage: {
             std::unique_ptr<lynx::MediaSnapshot> media(
                  reinterpret_cast<lynx::MediaSnapshot*>(lp));
@@ -694,6 +902,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (g.activities.view()==lynx::View::Expanded) {
                 if (wp==VK_SPACE) {
                     const auto selected=g.activities.primary();
+                    if(selected && selected->id==lynx::FocusTimer::kId) {
+                        toggleFocus();return 0;
+                    }
+                    if(selected && selected->id==lynx::FileShelf::kId) {
+                        revealFirstFile();return 0;
+                    }
                     if (selected && selected->id==lynx::MediaActivityBridge::kId &&
                         g.mediaSnapshot.available && g.mediaSnapshot.canToggle &&
                         g.mediaProvider) {
@@ -708,6 +922,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_TIMER:
+            if (wp==kFocusTimer) {timerFocusTick();return 0;}
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
             if (wp==kTransientTimer) {
                 const auto now=GetTickCount64();
@@ -756,11 +971,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     const bool chargingChanged=known && g.powerKnown &&
                         previous.ACLineStatus != g.power.ACLineStatus;
                     if (chargingChanged && g.power.ACLineStatus == 1) {
-                        g.transientToken=g.activities.transient(L"Power connected");
-                        if (g.transientToken) {
-                            g.transientDeadline=GetTickCount64()+2800;
-                            SetTimer(hwnd,kTransientTimer,2800,nullptr);
-                        }
+                        showTransient(L"Power connected",2800);
                     }
                     refresh();
                 }
@@ -780,6 +991,16 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             else if (lp==WM_LBUTTONDBLCLK) toggleExpanded();
             return 0;
         case WM_DESTROY:
+            g.volume.reset(); // unregister Core Audio callbacks before COM teardown
+            if(g.dropRegistered) {
+                RevokeDragDrop(hwnd);
+                g.dropRegistered=false;
+            }
+            if(g.dropTarget) {
+                g.dropTarget->Release();
+                g.dropTarget=nullptr;
+            }
+            KillTimer(hwnd,kFocusTimer);
             g.mediaProvider.reset(); // join MTA before HWND is destroyed
             MSG unconsumed{};
             while (PeekMessageW(&unconsumed,hwnd,kMediaMessage,kMediaMessage,PM_REMOVE))
@@ -822,8 +1043,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         if (singleton) CloseHandle(singleton);
         return instanceError == ERROR_ALREADY_EXISTS ? 0 : 5;
     }
+    // OLE drag/drop is a UI-STA facility. Do not initialize this thread as MTA.
+    const HRESULT oleResult=OleInitialize(nullptr);
+    const bool oleReady=SUCCEEDED(oleResult);
     GdiplusStartupInput startup{};
     if (GdiplusStartup(&g.gdiplus,&startup,nullptr)!=Ok) {
+        if(oleReady)OleUninitialize();
         CloseHandle(singleton); return 1;
     }
     WNDCLASSEXW wc{sizeof(wc)};
@@ -831,13 +1056,17 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     wc.lpszClassName=L"LYNX_M0_NATIVE_OVERLAY";
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     if (!RegisterClassExW(&wc)) {
-        GdiplusShutdown(g.gdiplus); CloseHandle(singleton); return 2;
+        GdiplusShutdown(g.gdiplus);
+        if(oleReady)OleUninitialize();
+        CloseHandle(singleton); return 2;
     }
     HWND hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_LAYERED|WS_EX_NOACTIVATE,
          wc.lpszClassName,L"LYNX M0",WS_POPUP,0,0,440,260,
          nullptr,nullptr,instance,nullptr);
     if (!hwnd) {
-        GdiplusShutdown(g.gdiplus); CloseHandle(singleton); return 3;
+        GdiplusShutdown(g.gdiplus);
+        if(oleReady)OleUninitialize();
+        CloseHandle(singleton); return 3;
     }
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -850,6 +1079,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
             L"LYNX M0 — Overlay initialization failed", MB_OK | MB_ICONERROR | MB_TOPMOST);
         DestroyWindow(hwnd);
         GdiplusShutdown(g.gdiplus);
+        if(oleReady)OleUninitialize();
         CloseHandle(singleton);
         return 4;
     }
@@ -857,6 +1087,35 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     diagnostic("startup overlay shown");
+    if(oleReady) {
+        g.dropTarget=new (std::nothrow) lynx::FileDropTarget(
+            [hwnd](std::vector<std::wstring> paths) {
+                bool added=false;
+                for(const auto& path:paths) {
+                    const DWORD attrs=GetFileAttributesW(path.c_str());
+                    if(attrs!=INVALID_FILE_ATTRIBUTES)
+                        added=g.shelf.add(path) || added;
+                }
+                if(added) {
+                    g.shelf.reconcile(g.activities);
+                    showTransient(L"File added",1800);
+                    refresh();
+                }
+                return added; // reject duplicate/full/unavailable drops
+            });
+        if(g.dropTarget) {
+            const HRESULT registered=RegisterDragDrop(hwnd,g.dropTarget);
+            g.dropRegistered=SUCCEEDED(registered);
+            if(!g.dropRegistered)diagnostic("RegisterDragDrop failed",
+                static_cast<DWORD>(registered));
+        }
+        g.volume=std::make_unique<lynx::WindowsVolumeFeedback>(
+            hwnd,kVolumeMessage);
+        g.volumeState=g.volume->read();
+        g.volumeInitialized=g.volumeState.available;
+    } else {
+        diagnostic("OleInitialize failed",static_cast<DWORD>(oleResult));
+    }
     g.mediaProvider=std::make_unique<lynx::WindowsMediaProvider>(
         [hwnd](lynx::MediaSnapshot snapshot) {
             auto message=std::make_unique<lynx::MediaSnapshot>(std::move(snapshot));
@@ -870,6 +1129,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         DispatchMessageW(&msg);
     }
     GdiplusShutdown(g.gdiplus);
+    if(oleReady)OleUninitialize();
     CloseHandle(singleton);
     return static_cast<int>(msg.wParam);
 }

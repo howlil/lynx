@@ -100,6 +100,15 @@ public:
         selected_ = primary() ? primary()->id : 0;
         expanded_ = true;
     }
+    bool select(std::uint32_t id) {
+        if(fullscreen_)return false;
+        auto it=activities_.find(id);
+        if(it==activities_.end() || !it->second.active)return false;
+        transient_.reset();
+        selected_=id;
+        expanded_=true;
+        return true;
+    }
     void collapse() {
         expanded_ = false;
         selected_ = 0;

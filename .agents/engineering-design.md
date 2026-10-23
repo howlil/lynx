@@ -296,3 +296,20 @@ Do not create empty ADR files merely to signal progress; record an actual decisi
 **Evidence:** Windows x64 compile/CTest and portable Linux tests passed at `7402df0d` in GitHub Actions run 40034238982. Tests cover source switching, playback status, disappearing/reappearing sessions and coordinator prioritization. **Not verified**: live GSMTC access/permission on the user's device, player compatibility, actual Play/Pause, charging event visual UX, persistence on reboot, Windows UI Automation details and idle CPU/GPU resource budget. GSMTC documentation declares the `globalMediaControl` capability; packaging/identity/permissions may need follow-up based on the observed HRESULT.
 
 **Handoff:** before finishing M2 or merging, test the downloadable Windows executable with an actual media player, inspect fallback/error handling, then run the existing DPI/focus/performance acceptance matrix. No new service, cloud backend or native extension system is justified by this integration.
+
+
+## M3 implementation record — general-user native utilities (24 October 2026)
+
+**Stage:** stacked implementation on M2; Windows CI validates compilation and portable core contracts, not actual desktop usability or native-performance claims.
+
+**Focus Timer:** `src/core/focus_timer.hpp` owns deadline, monotonic elapsed time, pause/resume, completion-once and ActivityCoordinator publication. `GetTickCount64` is the platform clock on the HWND thread. A Windows timer wakes once per second **only while running** and the presentation redraws when a visible value changes; timer state is not persisted on shutdown. Time asleep/hibernated counts as elapsed by explicit policy.
+
+**System feedback:** `src/win32/volume_feedback.hpp` owns Core Audio endpoint notification registration and teardown. Callback `IAudioEndpointVolumeCallback::OnNotify` only posts a message, which the UI thread resolves into a transient with a volume/mute value. Reacquiring a new default output device while running is not implemented yet; the present registration follows the endpoint selected at startup. Power feedback from M2 is retained.
+
+**File Shelf:** `src/core/file_shelf.hpp` owns at most five in-memory file/folder paths. `src/win32/file_drop_target.hpp` implements OLE `IDropTarget` for `CF_HDROP`; initialization and `RegisterDragDrop` occur on the UI STA with a normal message pump, with paired unregister and COM teardown. A valid drop adds path references only, never copies/reads/upload files. Expanded Reveal opens Explorer selection via shell PIDLs without executing the dropped file. Clear removes references. **Drag-out and per-item removal are not yet supported.** These are material limits, not completed functionality.
+
+**Shared presentation:** a user may explicitly select timer or shelf, pinning it in Expanded while unrelated higher-priority events do not steal focus. Timer completion can dismiss its own Expanded surface and show terminal feedback. Simulated legacy scenarios are no longer in the Release context menu, avoiding user-facing debug clutter.
+
+**Validation gate:** recheck Windows x64 build and Linux portable tests at latest head; manual Windows 11 testing still required for OLE drag/drop on the alpha-layered HWND, cursor hit-testing, timer after sleep, audio callback delivery and default device switching, native UIA control actions, 100–200% display scaling, file path error conditions, and idle CPU/memory. No claim of a production-ready file transfer or volume system.
+
+**Risk:** `OleInitialize` requires a compatible UI apartment; the media MTA worker remains isolated. RegisterDragDrop failure must not crash the shell. The CPU-layered renderer still needs compositor comparison before committing to a final Windows rendering stack.
