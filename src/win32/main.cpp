@@ -228,6 +228,7 @@ void onMediaSnapshot(lynx::MediaSnapshot next) {
 }
 
 void refresh();
+void setExpanded(bool wantExpanded);
 
 void showTransient(const std::wstring& text,UINT duration=2600) {
     g.transientToken=g.activities.transient(text);
@@ -243,10 +244,14 @@ void timerFocusTick() {
         return;
     }
     if(g.focus.advance(now)) {
+        const auto selected=g.activities.primary();
+        const bool ownExpanded=g.activities.expanded() &&
+              selected && selected->id==lynx::FocusTimer::kId;
+        if(ownExpanded) setExpanded(false); // terminal result may dismiss its own panel
         KillTimer(g.hwnd,kFocusTimer);
         g.focus.publish(g.activities,now);
         showTransient(L"Focus complete",3600);
-        refresh(); // forward declaration added below
+        refresh();
         return;
     }
     const auto selected=g.activities.primary();
