@@ -1,4 +1,7 @@
 #include "../src/core/island_core.hpp"
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <cmath>
 #include <iostream>
