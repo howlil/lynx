@@ -2,7 +2,35 @@
 
 A native Windows 11 Dynamic Island utility, starting with a **core feasibility experiment**.
 
-**Current status: M2 provider development, stacked on the M0 native feasibility and M1 activity core. Not a completed/released application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
+**Current status: M3 general-user utilities, stacked on M2/M1/M0. Not a completed/released application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
+
+## M3 — General-user utilities (native focus, volume HUD, file shelf)
+
+Branch: `feat/m3-general-utilities` (stacked on M2, M1 and M0). **This is an experimental build, not a completed Windows release.**
+
+### Working implementation
+
+- **Focus Timer:** 5/25-minute sessions based on `GetTickCount64()` deadlines, pause/resume/reset, completion feedback, no idle ticking. Windows sleep time counts toward the session. Activity status uses the existing coordinator, with a single completion transition. The current in-progress timer is **not persisted across application exit**, intentionally.
+- **System Feedback:** the current default multimedia output's `IAudioEndpointVolumeCallback` emits volume/mute changes to the HWND message queue without polling. Island shows a short passive HUD and restores the previous activity, without taking focus. **Output device switching while running is not yet subscribed**; a restart reacquires the default device.
+- **File Shelf (MVP):** drop Explorer files/folders onto the visible Island using OLE `IDropTarget`. At most five distinct paths are kept **in memory only**: no copy/upload, no file contents read, no cloud or persistent history. Open the shelf via tray; Expanded shows first item, **Reveal** selects it in Explorer (does not execute the file), **Clear** forgets references. **Drag-out and item-by-item removal are not yet implemented** and should not be claimed as complete.
+- **No redesign:** Floating, Top-attached, ambient clock/lens/battery and spring motion continue from prior milestones. The shell uses context actions while Expanded; other activities are not replaced while interacting.
+
+### Windows manual acceptance
+
+1. End the older LYNX process, download the `lynx-native-windows-x64` artifact of the latest **successful** M3 CI run, extract, and run `lynx_m0.exe`.
+2. Tray or right-click Island → **Start Focus · 5 min / 25 min**. Verify timer counts down while Compact, Pause freezes at correct remaining time, Resume does not reset, Reset removes activity, and complete triggers feedback once. Test sleep/resume; elapsed sleep counts.
+3. While Focus runs, play supported Windows media; Focus stays primary by priority unless another Expanded activity is explicitly selected. Use tray → **Show File Shelf** after dropping.
+4. Raise/lower volume and mute/unmute the **current default multimedia output** using Windows controls. Check transient HUD and restoration; check no focus theft and no repeated idle redraw.
+5. From Explorer, drag a small file or folder onto Island. The drop must preserve the source file; **Show File Shelf**, **Reveal** must open/select in Explorer without launching the file, and **Clear** removes it from Island. Try duplicate and sixth file; these should be ignored.
+6. Verify OLE drag/drop on Floating **and** Top-attached, plus other windows' click-through. Drag/drop requires a normal foreground desktop (not necessarily compatible with elevated applications).
+7. Repeat M0/M1/M2 smoke tests for media, power, DPI scaling, accessibility, fullscreen, lock/resume and resource usage. These behaviors are **not verified by CI alone**.
+
+### Remaining gaps
+
+- Full file drag-out, per-item controls and keyboard/UIA accessibility for each contextual button.
+- Core Audio default-device hot-swap via `IMMNotificationClient`, advanced multi-device UI and brightness controls.
+- Durable timer persistence policy, user-editable timer presets and notification sounds.
+- Compositor comparison, native performance benchmark and robust fullscreen policy remain M0/M4 work.
 
 ## M2 — Windows providers (real media + persistent settings)
 
