@@ -390,6 +390,8 @@ bool drawFrame() {
             else rounded(shape,x,y,w,h,std::min(h*.5f,22.0f));
             SolidBrush background(Color(255,0,0,0));
             graphics.FillPath(&background,&shape);
+            // All content stays within the interpolated shape while expanding.
+            graphics.SetClip(&shape);
 
             const float contentLeft = x + shoulder + 17.0f;
             const float contentRight = x + w - shoulder - 16.0f;
@@ -441,7 +443,26 @@ bool drawFrame() {
                           (g.mediaSnapshot.error.empty() ? L"Ambient clock and power are live Windows data." :
                            L"Media unavailable - see log / permissions"),12,
                           x+23,y+94,Color(255,164,164,170));
-                    if (selected && selected->id==lynx::MediaActivityBridge::kId &&
+                    if (selected && selected->id==lynx::FocusTimer::kId) {
+                        GraphicsPath pauseButton,resetButton;
+                        rounded(pauseButton,x+w-168.0f,y+125.0f,72.0f,31.0f,13.0f);
+                        rounded(resetButton,x+w-88.0f,y+125.0f,66.0f,31.0f,13.0f);
+                        SolidBrush buttonBrush(Color(255,39,39,44));
+                        graphics.FillPath(&buttonBrush,&pauseButton);
+                        graphics.FillPath(&buttonBrush,&resetButton);
+                        label(graphics,g.focus.state()==lynx::FocusTimer::State::Running?
+                            L"Pause":L"Resume",11,x+w-155.0f,y+130.0f,Color(255,245,245,247),true);
+                        label(graphics,L"Reset",11,x+w-77.0f,y+130.0f,Color(255,245,245,247),true);
+                    } else if (selected && selected->id==lynx::FileShelf::kId) {
+                        GraphicsPath openButton,clearButton;
+                        rounded(openButton,x+w-168.0f,y+125.0f,72.0f,31.0f,13.0f);
+                        rounded(clearButton,x+w-88.0f,y+125.0f,66.0f,31.0f,13.0f);
+                        SolidBrush buttonBrush(Color(255,39,39,44));
+                        graphics.FillPath(&buttonBrush,&openButton);
+                        graphics.FillPath(&buttonBrush,&clearButton);
+                        label(graphics,L"Reveal",11,x+w-156.0f,y+130.0f,Color(255,245,245,247),true);
+                        label(graphics,L"Clear",11,x+w-76.0f,y+130.0f,Color(255,245,245,247),true);
+                    } else if (selected && selected->id==lynx::MediaActivityBridge::kId &&
                         g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
                         GraphicsPath action;
                         rounded(action,x+w-85.0f,y+125.0f,63.0f,31.0f,13.0f);
@@ -450,8 +471,9 @@ bool drawFrame() {
                         label(graphics,g.mediaSnapshot.playing ? L"Pause" : L"Play",
                               12,x+w-74.0f,y+130.0f,Color(255,245,245,247),true);
                     }
-                    label(graphics,L"Click to collapse  |  Right-click for scenarios",11,
-                          x+23,y+120,Color(255,140,140,148));
+                    if(!selected)
+                        label(graphics,L"Drop files here · Right-click for actions",11,
+                              x+23,y+120,Color(255,140,140,148));
                     label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
                           x+23,y+153,Color(255,115,115,122));
                 }
@@ -469,6 +491,7 @@ bool drawFrame() {
                 label(graphics,g.activities.transientText(),13,contentLeft,y+15,
                       Color(255,48,209,88),true);
             }
+            graphics.ResetClip();
         }
     }
 
