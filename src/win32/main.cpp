@@ -786,6 +786,31 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     return 0;
                 }
             }
+            if(g.activities.view()==lynx::View::Expanded && selected) {
+                const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
+                const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
+                const float w=g.width.value(),y=g.offset.value();
+                if(py>=y+125.0f && py<=y+156.0f) {
+                    if(selected->id==lynx::FocusTimer::kId) {
+                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
+                            toggleFocus();return 0;
+                        }
+                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
+                            resetFocus();return 0;
+                        }
+                    }
+                    if(selected->id==lynx::FileShelf::kId) {
+                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
+                            revealFirstFile();return 0;
+                        }
+                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
+                            g.shelf.clear();
+                            g.shelf.reconcile(g.activities);
+                            refresh();return 0;
+                        }
+                    }
+                }
+            }
             toggleExpanded();
             return 0;
         }
@@ -798,6 +823,21 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         case kUiInvokeMessage:
             toggleExpanded();
             return 0;
+        case kVolumeMessage: {
+            if(!g.volume)return 0;
+            const auto now=g.volume->read();
+            if(!now.available)return 0;
+            const bool changed=g.volumeInitialized &&
+              (now.percent!=g.volumeState.percent || now.muted!=g.volumeState.muted);
+            g.volumeState=now;
+            g.volumeInitialized=true;
+            if(changed) {
+                showTransient(now.muted?L"Muted":
+                    (L"Volume " + std::to_wstring(now.percent) + L"%"),1450);
+                refresh();
+            }
+            return 0;
+        }
         case kMediaMessage: {
             std::unique_ptr<lynx::MediaSnapshot> media(
                  reinterpret_cast<lynx::MediaSnapshot*>(lp));
@@ -834,6 +874,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (g.activities.view()==lynx::View::Expanded) {
                 if (wp==VK_SPACE) {
                     const auto selected=g.activities.primary();
+                    if(selected && selected->id==lynx::FocusTimer::kId) {
+                        toggleFocus();return 0;
+                    }
+                    if(selected && selected->id==lynx::FileShelf::kId) {
+                        revealFirstFile();return 0;
+                    }
                     if (selected && selected->id==lynx::MediaActivityBridge::kId &&
                         g.mediaSnapshot.available && g.mediaSnapshot.canToggle &&
                         g.mediaProvider) {
@@ -848,6 +894,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_TIMER:
+            if (wp==kFocusTimer) {timerFocusTick();return 0;}
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
             if (wp==kTransientTimer) {
                 const auto now=GetTickCount64();
@@ -916,6 +963,16 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             else if (lp==WM_LBUTTONDBLCLK) toggleExpanded();
             return 0;
         case WM_DESTROY:
+            g.volume.reset(); // unregister Core Audio callbacks before COM teardown
+            if(g.dropRegistered) {
+                RevokeDragDrop(hwnd);
+                g.dropRegistered=false;
+            }
+            if(g.dropTarget) {
+                g.dropTarget->Release();
+                g.dropTarget=nullptr;
+            }
+            KillTimer(hwnd,kFocusTimer);
             g.mediaProvider.reset(); // join MTA before HWND is destroyed
             MSG unconsumed{};
             while (PeekMessageW(&unconsumed,hwnd,kMediaMessage,kMediaMessage,PM_REMOVE))
