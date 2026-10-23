@@ -919,6 +919,14 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case kVolumeMessage: {
             if(!g.volume)return 0;
+            if(wp==1) {
+                // A headset/unplug/speaker switch resets the HUD baseline.
+                // Do not announce a spurious volume change across devices.
+                if(!g.volume->rebind())diagnostic("volume endpoint unavailable");
+                g.volumeState=g.volume->read();
+                g.volumeInitialized=g.volumeState.available;
+                return 0;
+            }
             const auto now=g.volume->read();
             if(!now.available)return 0;
             const bool changed=g.volumeInitialized &&
