@@ -42,6 +42,19 @@ The same portable core tests also build on Linux/macOS with CMake, but the overl
 
 Media in M0 is intentionally **fake demonstration content**, not Spotify or Windows media integration. Clock and battery/power state are read from Windows. No cloud, analytics, clipboard capture, Explorer injection or administrator privilege required.
 
+## Troubleshooting: process exists but no Island is visible
+
+A Task Manager process row only proves the executable is alive. LYNX is intentionally a tool window, so it is absent from regular taskbar/Alt+Tab windows.
+
+1. **Close any older LYNX M0 process** in Task Manager. Only one instance can run; launching the new EXE while the old process holds the mutex will quietly exit the new instance.
+2. Download the latest **lynx-m0-windows-x64** artifact from the newest successful GitHub Actions run on the feature branch, extract it, then run \`lynx_m0.exe\`.
+3. Check the **top-center of the monitor where the mouse cursor was located at startup**. Move Task Manager aside: it may cover the overlay when the windows overlap.
+4. If still invisible, press **Ctrl+Alt+Space** and check the tray overflow (up arrow near the system clock) for the LYNX M0 icon; use its menu.
+5. Inspect \`%TEMP%\lynx-m0.log\` (paste that path into File Explorer). This log records the first layered frame, window visibility, size/DPI, per-pixel alpha sample and Windows error codes. Share it when reporting the issue. Do not assume a successful CI compile proves visible pixels.
+6. If startup rendering returns a failure, the updated version shows a **diagnostic message box and exits**, rather than continuing as a hidden background process.
+
+The preview should be a **small, ~232x42 DIP black pill near the very top of the screen**, not a full desktop application window. Its internal surface is experimental, not the complete prototype design. If the latest native build continues to be invisible but the log says "first layered frame OK", the remaining problem may involve desktop composition, monitor selection or topmost ordering and requires a Windows desktop test.
+
 ## Manual acceptance matrix — must run on Windows
 
 Do not mark any of these as passed without a dated test environment and results.
