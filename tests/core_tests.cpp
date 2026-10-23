@@ -153,6 +153,14 @@ int main() {
     focus.reset();
     assert(focus.publish(focusCoordinator,20'000'000));
     assert(focusCoordinator.view()==View::Ambient);
+    // If a user clicks Pause just after the deadline, the timer reaches
+    // Completed without waiting for a potentially delayed WM_TIMER.
+    focus.start(5,30'000'000);
+    assert(focus.publish(focusCoordinator,30'000'000));
+    assert(focus.pause(30'005'000));
+    assert(focus.state()==FocusTimer::State::Completed);
+    assert(focus.publish(focusCoordinator,30'005'000));
+    assert(focusCoordinator.view()==View::Ambient);
 
     // Shelf paths are references, not copies; duplicate and over-limit refused.
     FileShelf shelf;
