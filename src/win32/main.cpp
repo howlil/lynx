@@ -180,8 +180,8 @@ void drawFrame() {
                 const float center = x+w*0.5f;
                 SolidBrush lens(Color(255,17,17,20));
                 Pen lensStroke(Color(255,30,30,35),0.8f);
-                graphics.FillEllipse(&lens,center-17,y+16,34,10);
-                graphics.DrawEllipse(&lensStroke,center-17,y+16,34,10);
+                graphics.FillEllipse(&lens,center-17.0f,y+16.0f,34.0f,10.0f);
+                graphics.DrawEllipse(&lensStroke,center-17.0f,y+16.0f,34.0f,10.0f);
 
                 SYSTEM_POWER_STATUS power{};
                 const bool read = GetSystemPowerStatus(&power) != FALSE;
@@ -198,7 +198,7 @@ void drawFrame() {
                     const Color accent = charging ? Color(255,48,209,88) : Color(255,245,245,247);
                     label(graphics,powerText,12,textX,y+12,accent,true);
                     Pen batteryPen(accent,1.5f);
-                    graphics.DrawRectangle(&batteryPen,contentRight-18,y+15,15,10);
+                    graphics.DrawRectangle(&batteryPen,contentRight-18.0f,y+15.0f,15.0f,10.0f);
                     graphics.DrawLine(&batteryPen,contentRight-1,y+18,contentRight-1,y+22);
                     if (read && power.BatteryLifePercent != 255 && power.BatteryFlag != 128) {
                         SolidBrush chargeFill(accent);
@@ -220,7 +220,7 @@ void drawFrame() {
                 }
             } else if (currentView == lynx::View::Compact) {
                 SolidBrush cover(Color(255,68,97,165));
-                graphics.FillEllipse(&cover,x+shoulder+10,y+8,26,26);
+                graphics.FillEllipse(&cover,x+shoulder+10.0f,y+8.0f,26.0f,26.0f);
                 label(graphics,L"Now playing",12,x+shoulder+46,y+10,
                       Color(255,245,245,247),true);
                 label(graphics,L"Demo",10,contentRight-36,y+13,
