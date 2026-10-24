@@ -10,6 +10,7 @@
 #include <atomic>
 #include <algorithm>
 #include <condition_variable>
+#include <deque>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -63,7 +64,8 @@ private:
         {
             std::lock_guard<std::mutex> guard(signal_->mutex);
             if(signal_->stopping)return;
-            signal_->command=command;
+            if(signal_->commands.size()>=16)return; // bounded input pressure
+            signal_->commands.push_back(command);
         }
         signal_->cv.notify_one();
     }
@@ -76,7 +78,7 @@ private:
         std::condition_variable cv;
         bool dirty = true;
         bool stopping = false;
-        Command command=Command::None;
+        std::deque<Command> commands;
     };
 
     // Event handlers may outlive the subscription-removal call briefly;
@@ -162,10 +164,13 @@ private:
                 {
                     std::unique_lock<std::mutex> lock(signal_->mutex);
                     signal_->cv.wait(lock, [this] {
-                        return signal_->stopping || signal_->dirty || signal_->command!=Command::None;
+                        return signal_->stopping || signal_->dirty || !signal_->commands.empty();
                     });
                     if (signal_->stopping) break;
-                    command=std::exchange(signal_->command,Command::None);
+                    if(!signal_->commands.empty()) {
+                        command=signal_->commands.front();
+                        signal_->commands.pop_front();
+                    }
                     signal_->dirty = false;
                 }
 
