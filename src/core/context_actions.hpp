@@ -10,7 +10,7 @@
 namespace lynx {
 enum class ShellAction : std::uint8_t {
     None, MediaPrevious, MediaToggle, MediaNext,
-    FocusToggle, FocusReset, FileReveal, FileClear, StartFocus
+    FocusToggle, FocusReset, FileReveal, FileClear, StartFocus, DismissNotice
 };
 struct ActionInfo {
     ShellAction action=ShellAction::None;
