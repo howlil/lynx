@@ -282,86 +282,89 @@ void applyDpiAndPlacement() {
     }
 }
 
-void installStaticPath() {
-    const auto geo=lynx::target(g.attached?lynx::Placement::Attached:
+lynx::Geometry destination() {
+    return lynx::target(g.attached?lynx::Placement::Attached:
         lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
         lynx::View::Ambient);
-    g.current=geo;
-    g.hitGeometry=buildGeometry(geo,g.attached);
-    g.currentPath=makePath(g.hitGeometry);
+}
+
+void installStaticPath() {
+    const auto geo=destination();
+    g.morph.snap(geo);
+    g.currentPath=makePath(buildGeometry(geo,geo.shoulder>0.01f));
     g.shapeGeometry.Path(g.currentPath);
 }
 
 void finishMorph() {
     KillTimer(g.hwnd,kMorphTimer);
     g.shapeGeometry.StopAnimation(L"Path");
-    g.hitGeometry=std::move(g.nextHit);
-    g.currentPath=g.nextPath;
+    const auto geo=g.morph.destination();
+    g.morph.settle();
+    g.currentPath=makePath(buildGeometry(geo,geo.shoulder>0.01f));
     g.shapeGeometry.Path(g.currentPath);
-    g.current=lynx::target(g.attached?lynx::Placement::Attached:
-        lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
-        lynx::View::Ambient);
-    g.animating=false;
+    updateWindowRegion(geo);
 }
-void animateMorph() {
-    if(g.animating)finishMorph(); // no queued stale animation completion
-    g.expanded=!g.expanded;
-    const auto desired=lynx::target(g.attached?lynx::Placement::Attached:
-        lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
-        lynx::View::Ambient);
+
+void animateToTarget() {
+    // A new request is accepted even during an in-flight path animation.
+    // Starting shape is the interpolated pose, never the previous endpoint.
+    const auto now=GetTickCount64();
+    const auto from=g.morph.retarget(destination(),now,kDurationMs);
+    g.shapeGeometry.StopAnimation(L"Path");
+    g.currentPath=makePath(buildGeometry(from,from.shoulder>0.01f));
+    g.shapeGeometry.Path(g.currentPath);
     g.timing.record([&] {
-        g.nextHit=buildGeometry(desired,g.attached);
-        g.nextPath=makePath(g.nextHit);
+        g.nextPath=makePath(buildGeometry(destination(),g.attached));
         const auto animation=g.compositor.CreatePathKeyFrameAnimation();
         animation.Duration(std::chrono::milliseconds(kDurationMs));
         animation.InsertKeyFrame(0.f,g.currentPath);
         animation.InsertKeyFrame(1.f,g.nextPath);
         g.shapeGeometry.StartAnimation(L"Path",animation);
     });
-    g.animating=true;
-    SetTimer(g.hwnd,kMorphTimer,kDurationMs+20,nullptr);
+    updateWindowRegion(from);
+    SetTimer(g.hwnd,kMorphTimer,kHitSampleMs,nullptr);
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     switch(msg) {
-        case WM_NCHITTEST: {
-            if(g.animating || !g.hitGeometry)return HTTRANSPARENT;
-            POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-            ScreenToClient(hwnd,&pt);
-            const D2D1_POINT_2F local{
-                pt.x/g.dpiScale,pt.y/g.dpiScale
-            };
-            BOOL contains=FALSE;
-            if(SUCCEEDED(g.hitGeometry->FillContainsPoint(local,nullptr,0.25f,&contains))
-               && contains)return HTCLIENT;
-            // This is not a guarantee of cross-process click-through.
-            return HTTRANSPARENT;
-        }
+        case WM_NCHITTEST:
+            // SetWindowRgn is authoritative: points outside the region never
+            // target this HWND, even when the underlying app is another process.
+            return HTCLIENT;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
         case WM_LBUTTONUP:
-            if(!g.animating)animateMorph();
+            g.expanded=!g.expanded;
+            animateToTarget();
             return 0;
         case WM_RBUTTONUP:
-            if(!g.animating) {
-                g.attached=!g.attached;
-                installStaticPath();
-            }
+            g.attached=!g.attached;
+            animateToTarget();
             return 0;
         case WM_HOTKEY:
             if(wp==kQuitHotkey) {DestroyWindow(hwnd);return 0;}
-            if(g.animating)return 0;
-            if(wp==kExpandHotkey)animateMorph();
+            if(wp==kExpandHotkey) {
+                g.expanded=!g.expanded;
+                animateToTarget();
+            }
             if(wp==kPlacementHotkey) {
-                g.attached=!g.attached;installStaticPath();
+                g.attached=!g.attached;
+                animateToTarget();
             }
             return 0;
         case WM_TIMER:
-            if(wp==kMorphTimer && g.animating)finishMorph();
+            if(wp==kMorphTimer && g.morph.active()) {
+                const auto now=GetTickCount64();
+                if(g.morph.finished(now))finishMorph();
+                else updateWindowRegion(g.morph.sample(now));
+            }
             return 0;
         case WM_DPICHANGED:
-            if(g.visual)applyDpiAndPlacement();
-            return 0;
         case WM_DISPLAYCHANGE:
-            if(g.visual)applyDpiAndPlacement();
+            if(g.visual) {
+                applyDpiAndPlacement();
+                updateWindowRegion(g.morph.sample(GetTickCount64()));
+            }
             return 0;
         case WM_DESTROY:
             UnregisterHotKey(hwnd,kExpandHotkey);
@@ -417,6 +420,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         g.target.Root(g.visual);
         installStaticPath();
         applyDpiAndPlacement();
+        updateWindowRegion(g.morph.sample(GetTickCount64()));
 
         if(!RegisterHotKey(g.hwnd,kExpandHotkey,MOD_CONTROL|MOD_ALT,'I'))
             winrt::throw_last_error();
