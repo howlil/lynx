@@ -2,7 +2,49 @@
 
 A native Windows 11 Dynamic Island utility, starting with a **core feasibility experiment**.
 
-**Current status: M4-B renderer evidence and accessibility, stacked on M4-A and merged M0–M3. Not a completed/released application.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
+**Current status: M4-C compositor candidate A feasibility, stacked on M4-B/M4-A. Input and performance acceptance remain open; not a completed release.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
+
+## M4-C — Candidate A Win32 Windows.UI.Composition probe
+
+Branch: feat/m4c-composition-probe (stacked on M4-B). This is a **standalone shape/compositor feasibility executable**, not a switch of the production LYNX renderer.
+
+### Two executables in the Windows CI artifact
+
+- `lynx_m0.exe`: existing **GDI+ layered-window** complete prototype, unchanged.
+- `lynx_composition_probe.exe`: isolated **Win32 + Windows.UI.Composition** candidate A. It hosts a ShapeVisual in a DesktopWindowTarget with Direct2D-generated CompositionPathGeometry. Native PathKeyFrameAnimation morphs Floating/Top-attached Ambient to Expanded. There is no continuous CPU animation timer; a one-shot timer settles the path.
+
+### Probe controls
+
+- **Ctrl+Alt+I**: expand/collapse.
+- **Ctrl+Alt+P**: switch Floating / Top-attached.
+- **Ctrl+Alt+Q**: quit, export candidate metrics.
+- Click inside the static shape to expand, or right-click it to change placement.
+- Input is temporarily disabled **during a path animation**. This is an explicit limitation, not the finished interruptible behavior.
+
+**Close any existing LYNX overlay first** to avoid overlapping capsules. The probe has no clock, battery, activity controls, tray, or UI Automation, and is not an equal-feature replacement. Do not run both when comparing resource usage.
+
+### Candidate metrics
+
+Normal quit via Ctrl+Alt+Q exports:
+
+    %TEMP%\lynx-composition-metrics.csv
+
+Samples cover **CPU-side path construction and compositor animation submission only**, measured with QPC. They do not measure individual displayed frames. Existing GDI+ samples include **full CPU frame construction + UpdateLayeredWindow**; these are not equivalent workloads. Do not infer a winner from the shared CSV schema. GPU frame pacing still requires WPR/WPA.
+
+WS_EX_NOREDIRECTIONBITMAP removes the redirection bitmap; shape-aware WM_NCHITTEST uses the same Direct2D path. But **HTTRANSPARENT is not proven to pass clicks to windows owned by other processes**, so precise click-through remains a blocker.
+
+### Windows 11 manual acceptance
+
+1. Verify Floating rounded geometry and Top-attached concave shoulders without opaque rectangular backdrop.
+2. At 100%, 125%, 150%, 200% DPI and multiple monitors, inspect visual scaling, positioning, clipping.
+3. Against Explorer and browser, click outside the visible silhouette but inside its nominal HWND rectangle; verify input passthrough.
+4. Check repeated shortcuts during morph, click focus, safe app exit and Windows sleep/resume. Deliberate blocked input during morph is a known parity gap.
+5. Measure frame pacing/GPU with WPR/WPA on actual hardware. Record CPU, memory, DPI, monitor count and OS build.
+6. Before choosing a final compositor, add identical text, interactions and activity rendering, then benchmark matching workloads.
+
+**ADR-001 stays OPEN.** A native compositor compiled demo proves API wiring, not visual/input correctness, performance wins or complete app parity.
+
+References: https://learn.microsoft.com/en-us/windows/uwp/composition/using-the-visual-layer-with-win32 and https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/cpp/HelloVectors/HelloVectors_win32.cpp
 
 ## M4-B — Renderer baseline and accessibility
 
