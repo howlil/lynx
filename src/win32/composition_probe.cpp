@@ -238,20 +238,38 @@ bool geometrySelfTest() {
             float area=0.f;
             if(FAILED(path->ComputeArea(nullptr,0.25f,&area)) || area < 1500.f)
                 return false;
+            // Independent native input-region proof. This does NOT simulate
+            // an actual click on another process; only region geometry.
+            for(const float dpi:{1.0f,1.5f,2.0f}) {
+                HRGN region=buildNativeRegion(path.get(),dpi);
+                const bool center=PtInRegion(region,
+                    static_cast<int>(std::lround(mid*dpi)),
+                    static_cast<int>(std::lround(middleY*dpi)))!=0;
+                const bool outsideRegion=PtInRegion(region,
+                    static_cast<int>(std::lround((left-12.f)*dpi)),
+                    static_cast<int>(std::lround(middleY*dpi)))!=0;
+                DeleteObject(region);
+                if(!center || outsideRegion)return false;
+            }
         }
     }
     return true;
 }
 
-void updateWindowRegion(lynx::Geometry const& geo) {
-    const auto path=buildGeometry(geo,geo.shoulder>0.01f);
-    PathRegionSink sink(g.dpiScale);
-    winrt::check_hresult(path->Simplify(D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,
-        nullptr,0.20f/g.dpiScale,&sink));
+HRGN buildNativeRegion(ID2D1PathGeometry* path,float dpi) {
+    PathRegionSink sink(dpi);
+    winrt::check_hresult(path->Simplify(
+        D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,nullptr,0.20f/dpi,&sink));
     if(sink.vertices.size()<3)winrt::throw_hresult(E_FAIL);
     HRGN region=CreatePolygonRgn(sink.vertices.data(),
         static_cast<int>(sink.vertices.size()),WINDING);
     if(!region)winrt::throw_last_error();
+    return region;
+}
+
+void updateWindowRegion(lynx::Geometry const& geo) {
+    const auto path=buildGeometry(geo,geo.shoulder>0.01f);
+    HRGN region=buildNativeRegion(path.get(),g.dpiScale);
     if(!SetWindowRgn(g.hwnd,region,TRUE)) {
         DeleteObject(region); // transferred to USER32 only after success
         winrt::throw_last_error();
