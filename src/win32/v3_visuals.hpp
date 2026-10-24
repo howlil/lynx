@@ -84,11 +84,11 @@ inline void drawMusic(Graphics& g,float x,float y,Color color=white()){
     line(g,x+4,y+2,x+15,y,color,2);
     line(g,x+15,y,x+15,y+14,color,2);
     SolidBrush br(color);
-    g.FillEllipse(&br,x-1,y+14,7,6);
-    g.FillEllipse(&br,x+10,y+11,7,6);
+    g.FillEllipse(&br,x-1,y+14,7.f,6.f);
+    g.FillEllipse(&br,x+10,y+11,7.f,6.f);
 }
 inline void drawTimer(Graphics& g,float x,float y,Color c=orange()){
-    Pen p(c,1.7f);g.DrawEllipse(&p,x+2,y+3,15,15);
+    Pen p(c,1.7f);g.DrawEllipse(&p,x+2,y+3,15.f,15.f);
     line(g,x+10,y+10,x+13,y+7,c,1.6f);
     line(g,x+7,y,x+12,y,c,1.6f);
 }
@@ -119,7 +119,7 @@ inline void ambient(Graphics& g,const PaintState& p,float x,float y,float w,floa
         fillRound(g,mid-17,y+16,34,10,5,Color(255,16,16,20));
         strokeRound(g,mid-17,y+16,34,10,5,Color(255,35,35,39),.8f);
     } else if(p.center==CenterMode::Dot) {
-        SolidBrush dot(Color(255,52,199,89));g.FillEllipse(&dot,mid-3,y+18,6,6);
+        SolidBrush dot(Color(255,52,199,89));g.FillEllipse(&dot,mid-3,y+18,6.f,6.f);
     } else {
         text(g,p.day,9,mid-10,y+15,secondary(),true);
     }
@@ -167,8 +167,8 @@ inline void media(Graphics& g,const PaintState& p,float x,float y,float w,float 
     const float left=x+sh+16;
     fillRound(g,left,y+15,53,53,12,Color(255,115,88,148));
     // Stylized record-like album art, matching HTML v3 illustrative art
-    Pen art(Color(100,255,210,200),6);g.DrawEllipse(&art,left+15,y+8,46,46);
-    Pen arc(Color(100,212,174,233),5);g.DrawEllipse(&arc,left-12,y+38,51,51);
+    Pen art(Color(100,255,210,200),6);g.DrawEllipse(&art,left+15,y+8,46.f,46.f);
+    Pen arc(Color(100,212,174,233),5);g.DrawEllipse(&arc,left-12,y+38,51.f,51.f);
     drawMusic(g,left+20,y+31,white());
     text(g,p.title.empty()?L"Now Playing":p.title,13,left+64,y+21,white(),true);
     text(g,p.subtitle,10,left+64,y+43,secondary());
@@ -197,10 +197,10 @@ inline void timer(Graphics& g,const PaintState& p,float x,float y,float w,float 
     text(g,L"Focus Timer",11,x+39,y+17,secondary(),true);
     const float cx=x+w*.5f,cy=y+77.f;
     Pen track(Color(255,45,45,50),3.6f);
-    g.DrawEllipse(&track,cx-40,cy-40,80,80);
+    g.DrawEllipse(&track,cx-40,cy-40,80.f,80.f);
     Pen active(orange(),3.6f);active.SetStartCap(LineCapRound);active.SetEndCap(LineCapRound);
     const float progress=focusProgress(p.focusRemaining,p.focusDuration);
-    if(progress>.001f)g.DrawArc(&active,cx-40,cy-40,80,80,-90.f,360.f*progress);
+    if(progress>.001f)g.DrawArc(&active,cx-40,cy-40,80.f,80.f,-90.f,360.f*progress);
     const auto value=stamp(p.focusRemaining);
     text(g,value,23,cx-29,cy-17,white(),true);
     for(int i=0;i<2;i++){
