@@ -20,6 +20,7 @@
 #include <windows.graphics.interop.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
@@ -44,11 +45,13 @@ constexpr UINT_PTR kMorphTimer=200;
 constexpr int kExpandHotkey=201,kPlacementHotkey=202,kQuitHotkey=203;
 constexpr DWORD kDurationMs=350;
 
-struct GeoSource final:implements<GeoSource,Windows::Graphics::IGeometrySource2D,
+struct GeoSource:implements<GeoSource,Windows::Graphics::IGeometrySource2D,
                                    ABI::Windows::Graphics::IGeometrySource2DInterop> {
     explicit GeoSource(com_ptr<ID2D1Geometry> path):path_(std::move(path)){}
     HRESULT STDMETHODCALLTYPE GetGeometry(ID2D1Geometry** out) override {
-        return path_.copy_to(out);
+        if(!out)return E_POINTER;
+        path_.copy_to(out);
+        return S_OK;
     }
     HRESULT STDMETHODCALLTYPE TryGetGeometryUsingFactory(ID2D1Factory*,
                                                          ID2D1Geometry** out) override {
@@ -139,29 +142,29 @@ winrt::com_ptr<ID2D1PathGeometry> buildGeometry(lynx::Geometry geo,bool attached
         const float r=std::min(geo.height*.5f,22.f);
         sink->BeginFigure({x+r,y},D2D1_FIGURE_BEGIN_FILLED);
         sink->AddLine({right-r,y});
-        addCubic(sink,{right-r+k*r,y},{right,y+r-k*r},{right,y+r});
+        addCubic(sink.get(),{right-r+k*r,y},{right,y+r-k*r},{right,y+r});
         sink->AddLine({right,bottom-r});
-        addCubic(sink,{right,bottom-r+k*r},{right-r+k*r,bottom},{right-r,bottom});
+        addCubic(sink.get(),{right,bottom-r+k*r},{right-r+k*r,bottom},{right-r,bottom});
         sink->AddLine({x+r,bottom});
-        addCubic(sink,{x+r-k*r,bottom},{x,bottom-r+k*r},{x,bottom-r});
+        addCubic(sink.get(),{x+r-k*r,bottom},{x,bottom-r+k*r},{x,bottom-r});
         sink->AddLine({x,y+r});
-        addCubic(sink,{x,y+r-k*r},{x+r-k*r,y},{x+r,y});
+        addCubic(sink.get(),{x,y+r-k*r},{x+r-k*r,y},{x+r,y});
     } else {
         const float shoulder=std::min(geo.shoulder,geo.height*.36f);
         const float leftBody=x+shoulder,rightBody=right-shoulder;
         const float r=std::min(22.f,std::max(4.f,(geo.height-shoulder)*.8f));
         sink->BeginFigure({x,y},D2D1_FIGURE_BEGIN_FILLED);
         sink->AddLine({right,y});
-        addCubic(sink,{right-shoulder*.85f,y},
+        addCubic(sink.get(),{right-shoulder*.85f,y},
             {rightBody,y+shoulder*.08f},{rightBody,y+shoulder});
         sink->AddLine({rightBody,bottom-r});
-        addCubic(sink,{rightBody,bottom-r+k*r},
+        addCubic(sink.get(),{rightBody,bottom-r+k*r},
             {rightBody-r+k*r,bottom},{rightBody-r,bottom});
         sink->AddLine({leftBody+r,bottom});
-        addCubic(sink,{leftBody+r-k*r,bottom},
+        addCubic(sink.get(),{leftBody+r-k*r,bottom},
             {leftBody,bottom-r+k*r},{leftBody,bottom-r});
         sink->AddLine({leftBody,y+shoulder});
-        addCubic(sink,{leftBody,y+shoulder*.08f},
+        addCubic(sink.get(),{leftBody,y+shoulder*.08f},
             {x+shoulder*.85f,y},{x,y});
     }
     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
