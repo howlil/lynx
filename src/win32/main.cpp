@@ -69,6 +69,7 @@ struct App {
     lynx::ActivityCoordinator activities;
     lynx::Spring width{232}, height{42}, shoulder{0}, offset{13};
     bool reduced = false;
+    bool osReduced = false;
     lynx::v3::Preferences v3{};
     bool peekIdle=false;
     bool trayMenuOpen=false;
@@ -144,7 +145,7 @@ lynx::v3::Layout currentV3Layout() {
     return lynx::v3::layout(g.placement,presentationView(),currentV3Scene(),handle);
 }
 lynx::v3::Motion effectiveMotion() {
-    return g.reduced?lynx::v3::Motion::Reduced:g.v3.motion;
+    return (g.osReduced || g.reduced)?lynx::v3::Motion::Reduced:g.v3.motion;
 }
 lynx::v3::PaintState currentV3Paint() {
     lynx::v3::PaintState p;
@@ -234,6 +235,11 @@ void syncAccessibleState() {
     lynx::AccessibleSnapshot state;
     state.visible=g.activities.view()!=lynx::View::Hidden && IsWindowVisible(g.hwnd);
     state.expanded=state.visible && presentationView()==lynx::View::Expanded;
+    if(state.expanded) {
+        const auto target=currentV3Layout().geometry;
+        state.expanded=g.width.value()>=target.width*.90f &&
+                       g.height.value()>=target.height*.83f;
+    }
     const auto selected=g.activities.primary();
     if(selected) {
         state.ownerId=selected->id;
@@ -958,6 +964,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (g.dpi<=0) g.dpi=96;
             BOOL animations=TRUE;
             if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0)) {
+                g.osReduced=!animations;
                 g.reduced=!animations;
             }
             const auto preferences=lynx::WindowsSettingsStore::load();
@@ -986,7 +993,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         }
         case WM_MOUSEACTIVATE:
-            if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
+            if (presentationView() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
         case WM_LBUTTONUP: {
             const auto positions=currentV3Layout();
@@ -1161,11 +1168,19 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 return 0;
             }
             if(wp==kV3PeekTimer) {
-                KillTimer(hwnd,kV3PeekTimer);
-                if(!g.activities.expanded()) {
-                    g.peekIdle=false;
-                    refresh();
-                }
+                if(g.activities.view()==lynx::View::Ambient && g.peekIdle) {
+                    POINT cursor{};
+                    RECT bounds{};
+                    GetCursorPos(&cursor);
+                    GetWindowRect(hwnd,&bounds);
+                    if(PtInRect(&bounds,cursor)) {
+                        SetTimer(hwnd,kV3PeekTimer,750,nullptr);
+                    } else {
+                        KillTimer(hwnd,kV3PeekTimer);
+                        g.peekIdle=false;
+                        refresh();
+                    }
+                } else KillTimer(hwnd,kV3PeekTimer);
                 return 0;
             }
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
@@ -1185,6 +1200,8 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     g.expandedNotice=false;
                     const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
                     SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style|WS_EX_NOACTIVATE);
+                    if(g.priorFocus && IsWindow(g.priorFocus))
+                        SetForegroundWindow(g.priorFocus);
                     g.priorFocus=nullptr;
                 }
                 if (g.activities.expireTransient(g.transientToken)) refresh();
