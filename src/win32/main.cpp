@@ -6,6 +6,8 @@
 #include "file_drop_target.hpp"
 #include "media_provider.hpp"
 #include "settings_store.hpp"
+#include "render_metrics.hpp"
+#include "uia_shell.hpp"
 
 #include <windows.h>
 #include <objbase.h>
@@ -41,6 +43,8 @@ constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kMediaMessage = WM_APP + 3;
 constexpr UINT kVolumeMessage = WM_APP + 4;
 constexpr UINT kForegroundMessage = WM_APP + 5;
+constexpr UINT kUiActionMessage = WM_APP + 6;
+constexpr UINT kUiFocusMessage = WM_APP + 7;
 UINT gTaskbarRestarted = 0;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
@@ -80,7 +84,9 @@ struct App {
     HMONITOR chosenMonitor = nullptr;
     HMONITOR dpiMonitor = nullptr;
     bool firstFrame = true;
-    IRawElementProviderSimple* uiaProvider = nullptr;
+    lynx::ShellUiaRoot* uiaProvider = nullptr;
+    lynx::RenderMetrics renderMetrics;
+    int focusedAction=-1;
     std::unique_ptr<lynx::WindowsMediaProvider> mediaProvider;
     lynx::MediaSnapshot mediaSnapshot;
     lynx::MediaActivityBridge mediaBridge;
@@ -91,103 +97,13 @@ struct App {
 };
 App g;
 
-// A single accessible shell button for the M1 surface. Future expanded
-// controls require dedicated fragment providers; this does not pretend
-// those controls exist before implementation.
-class IslandUiaProvider final : public IRawElementProviderSimple, public IInvokeProvider {
-public:
-    explicit IslandUiaProvider(HWND hwnd) : hwnd_(hwnd) {}
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
-        if (!result) return E_POINTER;
-        *result = nullptr;
-        if (iid == __uuidof(IUnknown) || iid == __uuidof(IRawElementProviderSimple)) {
-            *result = static_cast<IRawElementProviderSimple*>(this);
-        } else if (iid == __uuidof(IInvokeProvider)) {
-            *result = static_cast<IInvokeProvider*>(this);
-        } else return E_NOINTERFACE;
-        AddRef();
-        return S_OK;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
-    ULONG STDMETHODCALLTYPE Release() override {
-        const auto remaining = --references_;
-        if (!remaining) delete this;
-        return remaining;
-    }
-
-    HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions* result) override {
-        if (!result) return E_POINTER;
-        *result = ProviderOptions_ServerSideProvider;
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID pattern,
-                                                 IUnknown** result) override {
-        if (!result) return E_POINTER;
-        *result = nullptr;
-        if (pattern == UIA_InvokePatternId) {
-            *result = static_cast<IInvokeProvider*>(this);
-            AddRef();
-        }
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID id, VARIANT* value) override {
-        if (!value) return E_POINTER;
-        VariantInit(value);
-        switch (id) {
-            case UIA_ControlTypePropertyId:
-                value->vt=VT_I4;
-                value->lVal=UIA_ButtonControlTypeId;
-                return S_OK;
-            case UIA_NamePropertyId: {
-                const auto view = g.activities.view();
-                const auto selected = g.activities.primary();
-                std::wstring name=L"LYNX Island";
-                if (view==lynx::View::Expanded) name+=L", expanded, invoke to close";
-                else if (view==lynx::View::Hidden) name+=L", hidden";
-                else if (view==lynx::View::Transient) name+=L", "+g.activities.transientText();
-                else if (selected) name+=L", "+selected->title+L", invoke to expand";
-                else name+=L", ambient, invoke to expand";
-                value->bstrVal=SysAllocString(name.c_str());
-                if (!value->bstrVal) return E_OUTOFMEMORY;
-                value->vt=VT_BSTR;
-                return S_OK;
-            }
-            case UIA_AutomationIdPropertyId:
-                value->bstrVal=SysAllocString(L"lynx.island.shell");
-                if (!value->bstrVal) return E_OUTOFMEMORY;
-                value->vt=VT_BSTR;
-                return S_OK;
-            case UIA_IsControlElementPropertyId:
-            case UIA_IsContentElementPropertyId:
-            case UIA_IsEnabledPropertyId:
-                value->vt=VT_BOOL;
-                value->boolVal=g.activities.view()==lynx::View::Hidden
-                    ? VARIANT_FALSE : VARIANT_TRUE;
-                return S_OK;
-            case UIA_IsKeyboardFocusablePropertyId:
-                value->vt=VT_BOOL;
-                value->boolVal=g.activities.view()==lynx::View::Expanded
-                    ? VARIANT_TRUE : VARIANT_FALSE;
-                return S_OK;
-            default: return S_OK;
-        }
-    }
-    HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(
-        IRawElementProviderSimple** result) override {
-        if (!result) return E_POINTER;
-        return UiaHostProviderFromHwnd(hwnd_,result);
-    }
-    HRESULT STDMETHODCALLTYPE Invoke() override {
-        if (!IsWindow(hwnd_) || g.activities.view()==lynx::View::Hidden) return E_FAIL;
-        return PostMessageW(hwnd_,kUiInvokeMessage,0,0) ? S_OK :
-            HRESULT_FROM_WIN32(GetLastError());
-    }
-private:
-    ~IslandUiaProvider() = default;
-    std::atomic<ULONG> references_{1};
-    HWND hwnd_ = nullptr;
-};
+lynx::ContextActions currentActions() {
+    const auto activity=g.activities.primary();
+    return lynx::contextActions(g.activities.view(),activity?activity->id:0,
+        g.focus.state(),
+        g.mediaSnapshot.available && g.mediaSnapshot.canToggle,
+        g.mediaSnapshot.playing,!g.shelf.files().empty());
+}
 
 void diagnostic(const char* operation, DWORD error = 0,
                 int widthPx = 0, int heightPx = 0, unsigned alpha = 0) {
@@ -228,6 +144,67 @@ void updateDpiForMonitor() {
     }
 }
 float scale() { return static_cast<float>(g.dpi) / 96.0f; }
+
+void syncAccessibleState() {
+    if(!g.uiaProvider)return;
+    lynx::AccessibleSnapshot state;
+    state.visible=g.activities.view()!=lynx::View::Hidden && IsWindowVisible(g.hwnd);
+    state.expanded=state.visible && g.activities.view()==lynx::View::Expanded;
+    const auto selected=g.activities.primary();
+    if(selected) {
+        state.ownerId=selected->id;
+        state.ownerGeneration=selected->generation;
+    }
+    state.name=L"LYNX Island";
+    if(state.expanded)state.name+=L", expanded";
+    if(selected)state.name+=L", "+selected->title;
+    if(g.activities.view()==lynx::View::Transient)
+        state.name+=L", "+g.activities.transientText();
+    GetWindowRect(g.hwnd,&state.screen);
+    const auto items=currentActions();
+    state.count=state.expanded?items.count:0;
+    state.focused=g.focusedAction;
+    const float ratio=scale();
+    const float origin=2.0f;
+    const float w=g.width.value();
+    const float y=g.offset.value()+125.0f;
+    for(int index=0;index<state.count;index++) {
+        const auto action=items.at(index);
+        if(!action)continue;
+        const float left=origin+w-(state.count==1?85.0f:
+                                          index==0?168.0f:88.0f);
+        const float width=state.count==1?63.0f:index==0?72.0f:66.0f;
+        const int x=state.screen.left+static_cast<int>(std::lround(left*ratio));
+        const int yy=state.screen.top+static_cast<int>(std::lround(y*ratio));
+        const int xx=state.screen.left+static_cast<int>(std::lround((left+width)*ratio));
+        const int bottom=state.screen.top+static_cast<int>(std::lround((y+31.0f)*ratio));
+        state.actions[index]={action->action,std::wstring(action->name),
+                              RECT{x,yy,xx,bottom}};
+    }
+    const auto before=g.uiaProvider->snapshot();
+    const bool changed=before.count!=state.count ||
+        before.ownerId!=state.ownerId ||
+        before.ownerGeneration!=state.ownerGeneration;
+    g.uiaProvider->update(std::move(state));
+    if(changed) {
+        (void)UiaRaiseStructureChangedEvent(
+            static_cast<IRawElementProviderSimple*>(g.uiaProvider),
+            StructureChangeType_ChildrenInvalidated,nullptr,0);
+    }
+}
+
+void announceAccessibleFocus() {
+    if(!g.uiaProvider || g.focusedAction<0)return;
+    IRawElementProviderFragment* element=nullptr;
+    if(FAILED(g.uiaProvider->GetFocus(&element)) || !element)return;
+    IRawElementProviderSimple* simple=nullptr;
+    if(SUCCEEDED(element->QueryInterface(__uuidof(IRawElementProviderSimple),
+            reinterpret_cast<void**>(&simple))) && simple) {
+        (void)UiaRaiseAutomationEvent(simple,UIA_AutomationFocusChangedEventId);
+        simple->Release();
+    }
+    element->Release();
+}
 
 void readPower() {
     SYSTEM_POWER_STATUS current{};
@@ -361,6 +338,7 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
 
 bool drawFrame() {
     if (g.activities.view() == lynx::View::Hidden) return true;
+    lynx::ScopedRenderSample timing(g.renderMetrics);
     updateDpiForMonitor();
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
@@ -500,6 +478,18 @@ bool drawFrame() {
                     if(!selected)
                         label(graphics,L"Drop files here · Right-click for actions",11,
                               x+23,y+120,Color(255,140,140,148));
+                    const auto actions=currentActions();
+                    if(g.focusedAction>=0 && g.focusedAction<actions.count) {
+                        const float buttonX=x+w-(actions.count==1?85.0f:
+                            g.focusedAction==0?168.0f:88.0f);
+                        const float buttonW=actions.count==1?63.0f:
+                            g.focusedAction==0?72.0f:66.0f;
+                        GraphicsPath focusContour;
+                        rounded(focusContour,buttonX-2.0f,y+123.0f,
+                                buttonW+4.0f,35.0f,14.0f);
+                        Pen focusStroke(Color(255,10,132,255),1.8f);
+                        graphics.DrawPath(&focusStroke,&focusContour);
+                    }
                     label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
                           x+23,y+153,Color(255,115,115,122));
                 }
@@ -548,7 +538,11 @@ bool drawFrame() {
     const DWORD updateError = updated ? 0 : GetLastError();
     if (!updated || g.firstFrame) diagnostic(updated ? "first layered frame OK" :
         "UpdateLayeredWindow failed",updateError,W,H,centerAlpha);
-    if (updated) g.firstFrame = false;
+    if (updated) {
+        g.firstFrame = false;
+        timing.success();
+        syncAccessibleState();
+    }
 
     SelectObject(memory,old);
     DeleteObject(dib);
@@ -557,9 +551,14 @@ bool drawFrame() {
     return updated != FALSE;
 }
 
-void refresh() { setTargets(); drawFrame(); }
+void refresh() {
+    setTargets();
+    drawFrame();
+    syncAccessibleState(); // Hidden has no draw, but must disappear from UIA tree.
+}
 
 void setExpanded(bool wantExpanded) {
+    g.focusedAction=-1;
     if (wantExpanded) {
         g.priorFocus = GetForegroundWindow();
         g.activities.expand();
@@ -698,6 +697,29 @@ void reconcileFullscreen() {
     refresh();
 }
 
+void invokeContextAction(lynx::ShellAction kind) {
+    const auto actions=currentActions();
+    bool supported=false;
+    for(int i=0;i<actions.count;i++) {
+        if(actions.items[i].action==kind){supported=true;break;}
+    }
+    if(!supported)return; // client or queued event may refer to an old action
+    switch(kind) {
+        case lynx::ShellAction::MediaToggle:
+            if(g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
+                g.mediaProvider->togglePlayPause();
+            break;
+        case lynx::ShellAction::FocusToggle: toggleFocus();break;
+        case lynx::ShellAction::FocusReset: resetFocus();break;
+        case lynx::ShellAction::FileReveal: revealFirstFile();break;
+        case lynx::ShellAction::FileClear:
+            g.shelf.clear();
+            g.shelf.reconcile(g.activities);
+            refresh();
+            break;
+        default:break;
+    }
+}
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
@@ -884,43 +906,21 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
         case WM_LBUTTONUP: {
-            const auto selected=g.activities.primary();
-            if (g.activities.view()==lynx::View::Expanded &&
-                selected && selected->id==lynx::MediaActivityBridge::kId &&
-                g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
+            if(g.activities.view()==lynx::View::Expanded) {
+                const auto actions=currentActions();
                 const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
                 const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
-                const float contentX=2.0f;
-                const float contentY=g.offset.value();
-                const float width=g.width.value();
-                if (px>=contentX+width-85.0f && px<=contentX+width-22.0f &&
-                    py>=contentY+125.0f && py<=contentY+156.0f) {
-                    if (g.mediaProvider) g.mediaProvider->togglePlayPause();
-                    return 0;
-                }
-            }
-            if(g.activities.view()==lynx::View::Expanded && selected) {
-                const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
-                const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
-                const float w=g.width.value(),y=g.offset.value();
-                if(py>=y+125.0f && py<=y+156.0f) {
-                    if(selected->id==lynx::FocusTimer::kId) {
-                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
-                            toggleFocus();return 0;
-                        }
-                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
-                            resetFocus();return 0;
-                        }
-                    }
-                    if(selected->id==lynx::FileShelf::kId) {
-                        if(px>=2.0f+w-168.0f && px<=2.0f+w-96.0f) {
-                            revealFirstFile();return 0;
-                        }
-                        if(px>=2.0f+w-88.0f && px<=2.0f+w-22.0f) {
-                            g.shelf.clear();
-                            g.shelf.reconcile(g.activities);
-                            refresh();return 0;
-                        }
+                for(int index=0;index<actions.count;index++) {
+                    const float left=2.0f+g.width.value()-
+                        (actions.count==1?85.0f:index==0?168.0f:88.0f);
+                    const float width=actions.count==1?63.0f:index==0?72.0f:66.0f;
+                    if(px>=left && px<left+width &&
+                       py>=g.offset.value()+125.0f &&
+                       py<g.offset.value()+156.0f) {
+                        g.focusedAction=index;
+                        invokeContextAction(actions.items[index].action);
+                        syncAccessibleState();
+                        return 0;
                     }
                 }
             }
@@ -935,6 +935,28 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case kUiInvokeMessage:
             toggleExpanded();
+            return 0;
+        case kUiActionMessage: {
+            const auto current=g.activities.primary();
+            if(current && current->generation==static_cast<std::uint64_t>(lp))
+                invokeContextAction(static_cast<lynx::ShellAction>(wp));
+            return 0;
+        }
+        case kUiFocusMessage:
+            if(g.activities.view()==lynx::View::Expanded) {
+                const auto actions=currentActions();
+                const int requested=static_cast<int>(wp);
+                const auto current=g.activities.primary();
+                if((requested==-1 ||
+                    (current && current->generation==static_cast<std::uint64_t>(lp))) &&
+                   (requested==-1 || (requested>=0 && requested<actions.count))) {
+                    g.focusedAction=requested;
+                    SetForegroundWindow(hwnd); // only explicit UIA focus request
+                    SetFocus(hwnd);
+                    refresh();
+                    announceAccessibleFocus();
+                }
+            }
             return 0;
         case kVolumeMessage: {
             if(!g.volume)return 0;
@@ -986,29 +1008,41 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         }
         case WM_GETOBJECT:
             if (static_cast<LONG>(lp)==UiaRootObjectId) {
-                if (!g.uiaProvider) g.uiaProvider=new (std::nothrow) IslandUiaProvider(hwnd);
+                if (!g.uiaProvider) {
+                    g.uiaProvider=new (std::nothrow) lynx::ShellUiaRoot(
+                        hwnd,kUiInvokeMessage,kUiActionMessage,kUiFocusMessage);
+                    if(g.uiaProvider) syncAccessibleState();
+                }
                 if (g.uiaProvider)
-                    return UiaReturnRawElementProvider(hwnd,wp,lp,g.uiaProvider);
+                    return UiaReturnRawElementProvider(hwnd,wp,lp,
+                        static_cast<IRawElementProviderSimple*>(g.uiaProvider));
             }
             break;
         case WM_KEYDOWN:
-            if (g.activities.view()==lynx::View::Expanded) {
-                if (wp==VK_SPACE) {
-                    const auto selected=g.activities.primary();
-                    if(selected && selected->id==lynx::FocusTimer::kId) {
-                        toggleFocus();return 0;
-                    }
-                    if(selected && selected->id==lynx::FileShelf::kId) {
-                        revealFirstFile();return 0;
-                    }
-                    if (selected && selected->id==lynx::MediaActivityBridge::kId &&
-                        g.mediaSnapshot.available && g.mediaSnapshot.canToggle &&
-                        g.mediaProvider) {
-                        g.mediaProvider->togglePlayPause();
+            if(g.activities.view()==lynx::View::Expanded) {
+                if(wp==VK_ESCAPE) {
+                    setExpanded(false);
+                    return 0;
+                }
+                const auto actions=currentActions();
+                if(wp==VK_TAB && actions.count>0) {
+                    const bool reverse=(GetKeyState(VK_SHIFT)&0x8000)!=0;
+                    g.focusedAction=reverse ?
+                        (g.focusedAction<0?actions.count-1:
+                         (g.focusedAction+actions.count-1)%actions.count) :
+                        (g.focusedAction+1)%actions.count;
+                    refresh();
+                    announceAccessibleFocus();
+                    return 0;
+                }
+                if((wp==VK_RETURN || wp==VK_SPACE) && actions.count>0) {
+                    const int selected=g.focusedAction<0?0:g.focusedAction;
+                    if(auto action=actions.at(selected)) {
+                        invokeContextAction(action->action);
                         return 0;
                     }
                 }
-                if (wp==VK_ESCAPE || wp==VK_RETURN || wp==VK_SPACE) {
+                if(wp==VK_RETURN && actions.count==0) {
                     setExpanded(false);
                     return 0;
                 }
@@ -1124,10 +1158,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 g.batterySubscription=nullptr;
             }
             if (g.uiaProvider) {
+                g.uiaProvider->invalidate();
                 UiaReturnRawElementProvider(hwnd,0,0,nullptr);
                 g.uiaProvider->Release();
                 g.uiaProvider=nullptr;
             }
+            g.renderMetrics.exportCsv();
             KillTimer(hwnd,kAnimationTimer);
             KillTimer(hwnd,kClockTimer);
             KillTimer(hwnd,kTransientTimer);

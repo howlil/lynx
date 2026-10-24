@@ -328,3 +328,24 @@ This is a **scoped reliability slice**, not a completed M4 or release approval.
 **Evidence status:** compilation/unit tests are verified by GitHub CI on the M4 branch. Correct behavior across true fullscreen apps, hardware audio output hot-swap, multi-DPI monitor disconnect, Explorer restart and sleep must still be accepted on a Windows device. The existing GDI+ layered renderer is an experimental baseline only. Full UIA child controls, compositor comparison (ADR-001), installer/updater and performance gates are **still open**.
 
 Important interface contracts retained: v3 Floating and Top-attached geometry, Ambient clock/lens/power, coordinator-controlled activity presentation and non-activating passive feedback. None of these require a new cloud process, plugin host or developer-focused surface.
+
+
+## M4-B implementation record — accessibility and renderer evidence (24 October 2026)
+
+Stage: feat/m4b-render-accessibility stacked on M4-A. This is not a final native compositor benchmark, an accessibility certification or a production release.
+
+### Accessibility contracts
+
+- The platform-independent context action model in src/core/context_actions.hpp determines whether Media Toggle, Focus Pause/Resume/Reset, or File Reveal/Clear are currently legal. The same model is used by mouse hit targets, keyboard and UI Automation; the window owner revalidates capabilities before dispatch.
+- src/win32/uia_shell.hpp replaces a single accessible shell button with a fragment root and individual action buttons. They expose readable names, per-action identifiers, screen bounds, parent/sibling navigation, Invoke and focus semantics.
+- UIA snapshots are mutex-protected. Fragment clients can outlive the native HWND safely: provider access is invalidated on window destruction. Child providers retain the root, and the root does not retain children (avoiding a COM reference cycle).
+- Every action fragment captures the activity identity and generation at creation; the UI owner checks current generation again before executing a posted UIA command. This prevents a delayed request for a previous media source from controlling a different active session.
+- Keyboard Tab/Shift+Tab selects controls and renders a focus outline; Enter/Space performs the current action and Escape closes Expanded. UIA structure and focus-change notifications signal virtual control changes. These behaviors are built but require hands-on Narrator and Accessibility Insights validation.
+
+### Render evidence boundaries
+
+- src/win32/render_metrics.hpp instruments the existing CPU-rendered GDI+ layered alpha window. Opt-in LYNX_RENDER_METRICS=1 captures QPC wall time around a draw/UpdateLayeredWindow call, draw failures and recent 95th percentile. Results are buffered and exported to a CSV under TEMP on normal process exit.
+- scripts/compare-render-metrics.ps1 compares actual result summaries with draw-count safeguards. It cannot infer absent data or measure display/GPU latency.
+- Actual comparison of Windows.UI.Composition candidate A and DirectComposition candidate B has NOT been implemented or performed in this milestone. ADR-001 compositor selection stays OPEN. Performance claims must include CPU/RAM sampler, frame pacing and GPU ETW traces, identical hardware/DPI/workloads, alpha click-through, focus, device loss and curved shoulder quality.
+
+Evidence: Windows/Linux CI can validate compilation, pure context-action transitions, UIA interface symbols and PowerShell comparison fixture. Windows narrator focus semantics, actual screen-reader behavior and native GPU measurements remain unverified.

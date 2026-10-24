@@ -1,7 +1,7 @@
 name: LYNX Native CI
 on:
   push:
-    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core", "feat/m2-windows-providers", "feat/m3-general-utilities", "feat/m4-runtime-hardening"]
+    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core", "feat/m2-windows-providers", "feat/m3-general-utilities", "feat/m4-runtime-hardening", "feat/m4b-render-accessibility"]
   pull_request:
 jobs:
   windows-build:
@@ -24,6 +24,22 @@ jobs:
             $errors | ForEach-Object { Write-Error $_.Message }
             exit 1
           }
+      - name: Validate renderer comparison harness
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./scripts/compare-render-metrics.ps1),
+            [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+          $fixture = Join-Path $env:RUNNER_TEMP 'lynx-fixture.csv'
+          @(
+            'renderer,total_draw_calls,failed_draw_calls,mean_cpu_ms,p95_recent_cpu_ms,max_cpu_ms,recent_window'
+            'layered_gdiplus,100,0,0.8000,1.3000,2.4000,100'
+          ) | Set-Content -Path $fixture
+          & ./scripts/compare-render-metrics.ps1 -Baseline $fixture -Candidate $fixture
+          if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit 1 }
       - name: Core tests
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Upload Windows feasibility executable
