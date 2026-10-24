@@ -4,6 +4,20 @@ A native Windows 11 Dynamic Island utility, starting with a **core feasibility e
 
 **Current status: M4-C compositor candidate A feasibility, stacked on M4-B/M4-A. Input and performance acceptance remain open; not a completed release.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
 
+## Runtime review remediation — experimental verification branch
+
+Branch: `fix/review-runtime-contracts`. These fixes respond to the post-merge M0–M4-C review and do **not** switch the default LYNX GDI+ renderer.
+
+- **Fullscreen:** the native host listens separately to foreground activation and `EVENT_OBJECT_LOCATIONCHANGE` for the active window, so same-foreground F11/borderless resizing now triggers reevaluation. The callback filters unrelated windows before messaging the UI thread.
+- **WinRT media lifecycle:** the worker tracks its current async operation, requests `Cancel` during shutdown, and forbids starting a new WinRT wait after stopping begins. It still uses a cooperative OS cancellation contract; the host must not claim a strict upper bound for `join()` without actual fault injection.
+- **Composition probe hit region:** an `ID2D1SimplifiedGeometrySink` converts the *same* silhouette geometry to a USER32 `SetWindowRgn` region. The input/drawable HWND region is refreshed during morph and DPI changes, rather than relying exclusively on `HTTRANSPARENT` across process boundaries. Geometry region containment is checked in the Windows headless self-test. On Windows hardware, test whether ShapeVisual clips correctly and whether the underlying browser/Explorer receives clicks **outside** the visible outline.
+- **Composition morph:** rapid click/hotkey retargeting now samples interpolated geometry before submitting a new compositor animation. This is an approximation of the in-flight GPU path; animation fidelity on actual Windows must be verified.
+- **General-user UI:** renderer-engineering diagnostics are only rendered in `_DEBUG` builds.
+
+**Benchmark caveat:** USER32 region construction and `SetWindowRgn` can add CPU work at approximately 16 ms intervals **while morphing**. This extra work is not fully represented by the existing Composition QPC path-submission CSV. Use whole-process CPU and WPR/WPA on identical visual workloads before selecting a winner.
+
+No release-readiness, cross-process hit-testing success, or bounded media-worker shutdown time is asserted on CI compilation alone.
+
 ## M4-C — Candidate A Win32 Windows.UI.Composition probe
 
 Branch: feat/m4c-composition-probe (stacked on M4-B). This is a **standalone shape/compositor feasibility executable**, not a switch of the production LYNX renderer.
