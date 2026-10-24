@@ -4,6 +4,18 @@ A native Windows 11 Dynamic Island utility, starting with a **core feasibility e
 
 **Current status: M4-C compositor candidate A feasibility, stacked on M4-B/M4-A. Input and performance acceptance remain open; not a completed release.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
 
+## Post-merge runtime review fixes (experimental)
+
+Branch: `fix/post-merge-runtime-review`, based on merged M0–M4-C `master`.
+
+- The main LYNX window now listens for foreground-window **location/size changes** as well as foreground switches; this covers in-place browser F11 transitions without polling.
+- C++/WinRT media requests (manager, metadata and playback toggle) use one bounded `wait_for` per operation and request cancellation on timeout, instead of blocking worker shutdown indefinitely on `get()`. Cancellation is best effort; actual unresponsive COM providers and non-async synchronous calls still require Windows reliability testing.
+- Candidate A now creates its Win32 **window region** from the Direct2D silhouette using flattened vertices and `SetWindowRgn`. Region tests run at 100/150/200% effective scaling; unlike HTTRANSPARENT, the region excludes off-shape parts of the HWND itself. Manual cross-process mouse testing is still mandatory.
+- Ambient/Expanded and placement changes now **retarget from the interpolated geometry** even during an active morph. A 16 ms timer updates only the native input clip region; the visual path still animates using Windows Composition. This introduces CPU cost during morph and may reveal pacing artifacts; measure it on real Windows hardware before choosing the compositor.
+- Diagnostic renderer text was removed from Release's Expanded Island but remains available in Debug.
+
+**Still two separate executable targets**, not an implicit switch to the candidate. Do not release or select a compositor solely because CI is green.
+
 ## M4-C — Candidate A Win32 Windows.UI.Composition probe
 
 Branch: feat/m4c-composition-probe (stacked on M4-B). This is a **standalone shape/compositor feasibility executable**, not a switch of the production LYNX renderer.
@@ -11,15 +23,15 @@ Branch: feat/m4c-composition-probe (stacked on M4-B). This is a **standalone sha
 ### Two executables in the Windows CI artifact
 
 - `lynx_m0.exe`: existing **GDI+ layered-window** complete prototype, unchanged.
-- `lynx_composition_probe.exe`: isolated **Win32 + Windows.UI.Composition** candidate A. It hosts a ShapeVisual in a DesktopWindowTarget with Direct2D-generated CompositionPathGeometry. Native PathKeyFrameAnimation morphs Floating/Top-attached Ambient to Expanded. There is no continuous CPU animation timer; a one-shot timer settles the path.
+- `lynx_composition_probe.exe`: isolated **Win32 + Windows.UI.Composition** candidate A. It hosts a ShapeVisual in a DesktopWindowTarget with Direct2D-generated CompositionPathGeometry. Native PathKeyFrameAnimation morphs Floating/Top-attached Ambient to Expanded. A 16 ms timer reconciles the OS window region only during morph; composition still owns visual interpolation.
 
 ### Probe controls
 
 - **Ctrl+Alt+I**: expand/collapse.
 - **Ctrl+Alt+P**: switch Floating / Top-attached.
 - **Ctrl+Alt+Q**: quit, export candidate metrics.
-- Click inside the static shape to expand, or right-click it to change placement.
-- Input is temporarily disabled **during a path animation**. This is an explicit limitation, not the finished interruptible behavior.
+- Click inside the currently visible silhouette to expand, or right-click to change placement.
+- Repeated user input during a morph retargets from the interpolated pose. Exact native visual/input synchronization remains subject to on-device verification.
 
 **Close any existing LYNX overlay first** to avoid overlapping capsules. The probe has no clock, battery, activity controls, tray, or UI Automation, and is not an equal-feature replacement. Do not run both when comparing resource usage.
 
@@ -31,14 +43,14 @@ Normal quit via Ctrl+Alt+Q exports:
 
 Samples cover **CPU-side path construction and compositor animation submission only**, measured with QPC. They do not measure individual displayed frames. Existing GDI+ samples include **full CPU frame construction + UpdateLayeredWindow**; these are not equivalent workloads. Do not infer a winner from the shared CSV schema. GPU frame pacing still requires WPR/WPA.
 
-WS_EX_NOREDIRECTIONBITMAP removes the redirection bitmap; shape-aware WM_NCHITTEST uses the same Direct2D path. But **HTTRANSPARENT is not proven to pass clicks to windows owned by other processes**, so precise click-through remains a blocker.
+The probe now uses **SetWindowRgn** with a polygon produced by flattening its Direct2D path. HWND regions exclude off-shape points at the OS window boundary. This replaces the unsupported reliance on HTTRANSPARENT for cross-process click-through, but physical Windows acceptance is still required.
 
 ### Windows 11 manual acceptance
 
 1. Verify Floating rounded geometry and Top-attached concave shoulders without opaque rectangular backdrop.
 2. At 100%, 125%, 150%, 200% DPI and multiple monitors, inspect visual scaling, positioning, clipping.
 3. Against Explorer and browser, click outside the visible silhouette but inside its nominal HWND rectangle; verify input passthrough.
-4. Check repeated shortcuts during morph, click focus, safe app exit and Windows sleep/resume. Deliberate blocked input during morph is a known parity gap.
+4. Check repeated shortcuts during morph, click focus, safe app exit and Windows sleep/resume. Retargeting must preserve continuity and the OS input region must follow the visible contour.
 5. Measure frame pacing/GPU with WPR/WPA on actual hardware. Record CPU, memory, DPI, monitor count and OS build.
 6. Before choosing a final compositor, add identical text, interactions and activity rendering, then benchmark matching workloads.
 
