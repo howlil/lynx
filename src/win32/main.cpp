@@ -72,6 +72,8 @@ struct App {
     lynx::v3::Preferences v3{};
     bool peekIdle=false;
     bool trayMenuOpen=false;
+    bool expandedNotice=false;
+    std::wstring noticeDetail;
     bool lowBatteryNotified=false;
     std::uint64_t demoRevision = 0;
     std::uint64_t timerRevision = 0;
@@ -106,7 +108,18 @@ struct App {
 };
 App g;
 
+lynx::View presentationView() {
+    if(g.expandedNotice && !g.activities.fullscreen())
+        return lynx::View::Expanded;
+    return g.activities.view();
+}
 lynx::ContextActions currentActions() {
+    if(g.expandedNotice) {
+        lynx::ContextActions actions;
+        actions.items[0]={lynx::ShellAction::DismissNotice,L"Dismiss notification"};
+        actions.count=1;
+        return actions;
+    }
     const auto activity=g.activities.primary();
     return lynx::contextActions(g.activities.view(),activity?activity->id:0,
         g.focus.state(),
@@ -116,6 +129,7 @@ lynx::ContextActions currentActions() {
 }
 
 lynx::v3::Scene currentV3Scene() {
+    if(g.expandedNotice)return lynx::v3::Scene::Alert;
     if(g.activities.view()==lynx::View::Transient)return lynx::v3::Scene::Alert;
     const auto activity=g.activities.primary();
     if(!activity)return lynx::v3::Scene::Idle;
@@ -127,7 +141,7 @@ lynx::v3::Scene currentV3Scene() {
 lynx::v3::Layout currentV3Layout() {
     const bool handle=g.activities.view()==lynx::View::Ambient &&
         g.v3.idle==lynx::v3::IdleMode::Adaptive && !g.peekIdle;
-    return lynx::v3::layout(g.placement,g.activities.view(),currentV3Scene(),handle);
+    return lynx::v3::layout(g.placement,presentationView(),currentV3Scene(),handle);
 }
 lynx::v3::Motion effectiveMotion() {
     return g.reduced?lynx::v3::Motion::Reduced:g.v3.motion;
@@ -135,7 +149,7 @@ lynx::v3::Motion effectiveMotion() {
 lynx::v3::PaintState currentV3Paint() {
     lynx::v3::PaintState p;
     p.layout=currentV3Layout();
-    p.view=g.activities.view();
+    p.view=presentationView();
     p.center=g.v3.center;
     p.playing=currentV3Scene()==lynx::v3::Scene::Timer ?
         g.focus.state()==lynx::FocusTimer::State::Running:g.mediaSnapshot.playing;
@@ -168,7 +182,7 @@ lynx::v3::PaintState currentV3Paint() {
         if(p.layout.scene==lynx::v3::Scene::Shelf)p.title=g.shelf.firstName();
         if(p.layout.scene==lynx::v3::Scene::Timer)p.title=activity->title;
     }
-    p.notice=g.activities.transientText();
+    p.notice=g.expandedNotice?g.noticeDetail:g.activities.transientText();
     p.hasSecondary=g.activities.view()==lynx::View::Compact &&
         g.activities.secondary().has_value();
     p.secondaryLabel=p.hasSecondary?g.activities.secondary()->title:L"";
@@ -219,7 +233,7 @@ void syncAccessibleState() {
     if(!g.uiaProvider)return;
     lynx::AccessibleSnapshot state;
     state.visible=g.activities.view()!=lynx::View::Hidden && IsWindowVisible(g.hwnd);
-    state.expanded=state.visible && g.activities.view()==lynx::View::Expanded;
+    state.expanded=state.visible && presentationView()==lynx::View::Expanded;
     const auto selected=g.activities.primary();
     if(selected) {
         state.ownerId=selected->id;
@@ -540,6 +554,17 @@ void refresh() {
 
 void setExpanded(bool wantExpanded) {
     g.focusedAction=-1;
+    if(wantExpanded && g.activities.view()==lynx::View::Transient) {
+        g.priorFocus=GetForegroundWindow();
+        g.noticeDetail=g.activities.transientText();
+        g.expandedNotice=true;
+        const auto style=GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
+        SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style & ~WS_EX_NOACTIVATE);
+        refresh();
+        SetForegroundWindow(g.hwnd);
+        SetFocus(g.hwnd);
+        return;
+    }
     if (wantExpanded) {
         g.priorFocus = GetForegroundWindow();
         g.activities.expand();
@@ -551,7 +576,12 @@ void setExpanded(bool wantExpanded) {
         SetForegroundWindow(g.hwnd);
         SetFocus(g.hwnd);
     } else {
-        g.activities.collapse();
+        if(g.expandedNotice) {
+            g.expandedNotice=false;
+            g.activities.expireTransient(g.transientToken);
+        } else {
+            g.activities.collapse();
+        }
         const auto style = GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
         SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
         refresh();
@@ -560,7 +590,7 @@ void setExpanded(bool wantExpanded) {
     }
 }
 
-void toggleExpanded() { setExpanded(g.activities.view() != lynx::View::Expanded); }
+void toggleExpanded() { setExpanded(presentationView()!=lynx::View::Expanded); }
 
 void openActivity(std::uint32_t id) {
     if(g.activities.view()!=lynx::View::Expanded) setExpanded(true);
@@ -705,6 +735,9 @@ void invokeContextAction(lynx::ShellAction kind) {
             break;
         case lynx::ShellAction::StartFocus:
             startFocus(25*60);
+            break;
+        case lynx::ShellAction::DismissNotice:
+            setExpanded(false);
             break;
         case lynx::ShellAction::MediaToggle:
             if(g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
@@ -960,7 +993,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     openActivity(other->id);
                 return 0;
             }
-            if(g.activities.view()==lynx::View::Expanded) {
+            if(presentationView()==lynx::View::Expanded) {
                 const auto actions=currentActions();
                 for(int index=0;index<actions.count;index++) {
                     if(lynx::v3::inside(positions.actions[index],px,py)) {
@@ -1002,7 +1035,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         }
         case kUiFocusMessage:
-            if(g.activities.view()==lynx::View::Expanded) {
+            if(presentationView()==lynx::View::Expanded) {
                 const auto actions=currentActions();
                 const int requested=static_cast<int>(wp);
                 const auto current=g.activities.primary();
@@ -1078,7 +1111,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_KEYDOWN:
-            if(g.activities.view()==lynx::View::Expanded) {
+            if(presentationView()==lynx::View::Expanded) {
                 if(wp==VK_ESCAPE) {
                     setExpanded(false);
                     return 0;
@@ -1135,6 +1168,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                     return 0;
                 }
                 KillTimer(hwnd,kTransientTimer);
+                if(g.expandedNotice) {
+                    g.expandedNotice=false;
+                    const auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+                    SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style|WS_EX_NOACTIVATE);
+                    g.priorFocus=nullptr;
+                }
                 if (g.activities.expireTransient(g.transientToken)) refresh();
                 return 0;
             }
