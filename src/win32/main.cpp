@@ -78,6 +78,7 @@ struct App {
     bool hiddenByDemo = false;
     bool actualFullscreen = false;
     HWINEVENTHOOK foregroundHook = nullptr;
+    HWINEVENTHOOK locationHook = nullptr;
     HWND priorFocus = nullptr;
     int dpi = 96;
     ULONGLONG previousFrame = 0;
@@ -490,8 +491,10 @@ bool drawFrame() {
                         Pen focusStroke(Color(255,10,132,255),1.8f);
                         graphics.DrawPath(&focusStroke,&focusContour);
                     }
+#ifdef _DEBUG
                     label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
                           x+23,y+153,Color(255,115,115,122));
+#endif
                 }
             } else if (currentView == lynx::View::Compact) {
                 SolidBrush cover(Color(255,68,97,165));
@@ -644,9 +647,16 @@ void revealFirstFile() {
 
 void foregroundCallback(HWINEVENTHOOK, DWORD event, HWND window,
                         LONG object, LONG child, DWORD, DWORD) {
-    if(event != EVENT_SYSTEM_FOREGROUND || object != OBJID_WINDOW ||
-       child != CHILDID_SELF || window == g.hwnd || !g.hwnd)return;
-    PostMessageW(g.hwnd,kForegroundMessage,0,0);
+    if(object != OBJID_WINDOW || child != CHILDID_SELF ||
+       window == g.hwnd || !g.hwnd)return;
+    // F11/borderless fullscreen can resize the *same* foreground HWND.
+    // Filtering its location events avoids a global redraw stream caused
+    // by unrelated moving windows and caret/child accessibility events.
+    if(event==EVENT_SYSTEM_FOREGROUND ||
+       (event==EVENT_OBJECT_LOCATIONCHANGE &&
+        window==GetForegroundWindow())) {
+        PostMessageW(g.hwnd,kForegroundMessage,0,0);
+    }
 }
 
 void reconcileMonitor() {
@@ -1135,6 +1145,10 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 UnhookWinEvent(g.foregroundHook);
                 g.foregroundHook=nullptr;
             }
+            if(g.locationHook) {
+                UnhookWinEvent(g.locationHook);
+                g.locationHook=nullptr;
+            }
             g.volume.reset(); // unregister Core Audio callbacks before COM teardown
             if(g.dropRegistered) {
                 RevokeDragDrop(hwnd);
@@ -1237,6 +1251,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     g.foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,
         nullptr,foregroundCallback,0,0,WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     if(!g.foregroundHook)diagnostic("foreground hook failed",GetLastError());
+    g.locationHook=SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,
+        EVENT_OBJECT_LOCATIONCHANGE,nullptr,foregroundCallback,0,0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    if(!g.locationHook)diagnostic("location hook failed",GetLastError());
     reconcileFullscreen();
     if(oleReady) {
         g.dropTarget=new (std::nothrow) lynx::FileDropTarget(
