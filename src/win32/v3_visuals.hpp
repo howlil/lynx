@@ -165,7 +165,11 @@ inline void compact(Graphics& g,const PaintState& p,float x,float y,float w,floa
 inline void media(Graphics& g,const PaintState& p,float x,float y,float w,float h) {
     const float sh=p.layout.geometry.shoulder;
     const float left=x+sh+16;
-    fillRound(g,left,y+15,53,53,12,Color(255,115,88,148));
+    GraphicsPath album;
+    pill(album,left,y+15,53,53,12);
+    LinearGradientBrush cover(PointF(left,y+15),PointF(left+53,y+68),
+        Color(255,236,177,168),Color(255,58,59,114));
+    g.FillPath(&cover,&album);
     // Stylized record-like album art, matching HTML v3 illustrative art
     Pen art(Color(100,255,210,200),6);g.DrawEllipse(&art,left+15,y+8,46.f,46.f);
     Pen arc(Color(100,212,174,233),5);g.DrawEllipse(&arc,left-12,y+38,51.f,51.f);
@@ -241,7 +245,17 @@ inline void alert(Graphics& g,const PaintState& p,float x,float y,float w) {
     else {line(g,x+30,y+51,x+37,y+57,c,2.5f);
           line(g,x+37,y+57,x+49,y+42,c,2.5f);}
     text(g,p.notice,14,x+74,y+28,white(),true);
-    text(g,L"Notification from Windows",11,x+74,y+53,secondary());
+    const std::wstring details=p.notice.find(L"Low")!=std::wstring::npos?
+        L"Battery low · Connect power":
+        p.notice.find(L"Focus")!=std::wstring::npos?
+        L"Your focus session has ended":
+        L"Battery connected to power";
+    text(g,details,11,x+74,y+53,secondary());
+    const auto close=p.layout.actions[0];
+    fillRound(g,x+close.x,y+close.y,close.w,close.h,close.w*.5f,
+        Color(255,34,34,39));
+    line(g,x+close.x+9,y+close.y+9,x+close.x+18,y+close.y+18,secondary(),1.5f);
+    line(g,x+close.x+18,y+close.y+9,x+close.x+9,y+close.y+18,secondary(),1.5f);
 }
 inline void paint(Graphics& graphics,const PaintState& state,
                   float x,float y,float width,float height) {
