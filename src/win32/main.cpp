@@ -8,6 +8,7 @@
 #include "settings_store.hpp"
 #include "render_metrics.hpp"
 #include "uia_shell.hpp"
+#include "v3_visuals.hpp"
 
 #include <windows.h>
 #include <objbase.h>
@@ -38,6 +39,8 @@ constexpr UINT_PTR kAnimationTimer = 101;
 constexpr UINT_PTR kClockTimer = 102;
 constexpr UINT_PTR kTransientTimer = 103;
 constexpr UINT_PTR kFocusTimer = 104;
+constexpr UINT_PTR kV3TickTimer = 105;
+constexpr UINT_PTR kV3PeekTimer = 106;
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kMediaMessage = WM_APP + 3;
@@ -54,7 +57,9 @@ constexpr float kCanvasHeightDip = 260.0f;
 enum MenuId : UINT {
     kShowHere = 2000, kFloating = 2001, kAttached, kAmbient, kMediaDemo,
     kTimerDemo, kFocus5, kFocus25, kFocusPause, kFocusReset,
-    kShelfOpen, kShelfClear, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit
+    kShelfOpen, kShelfClear, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit,
+    kIdlePersistent, kIdleAdaptive, kCenterLens, kCenterDot, kCenterDay,
+    kMotionSmooth, kMotionSnappy
 };
 
 struct App {
@@ -64,6 +69,9 @@ struct App {
     lynx::ActivityCoordinator activities;
     lynx::Spring width{232}, height{42}, shoulder{0}, offset{13};
     bool reduced = false;
+    lynx::v3::Preferences v3{};
+    bool peekIdle=false;
+    bool lowBatteryNotified=false;
     std::uint64_t demoRevision = 0;
     std::uint64_t timerRevision = 0;
     lynx::FocusTimer focus;
@@ -102,7 +110,68 @@ lynx::ContextActions currentActions() {
     return lynx::contextActions(g.activities.view(),activity?activity->id:0,
         g.focus.state(),
         g.mediaSnapshot.available && g.mediaSnapshot.canToggle,
-        g.mediaSnapshot.playing,!g.shelf.files().empty());
+        g.mediaSnapshot.playing,!g.shelf.files().empty(),
+        g.mediaSnapshot.canPrevious,g.mediaSnapshot.canNext);
+}
+
+lynx::v3::Scene currentV3Scene() {
+    if(g.activities.view()==lynx::View::Transient)return lynx::v3::Scene::Alert;
+    const auto activity=g.activities.primary();
+    if(!activity)return lynx::v3::Scene::Idle;
+    if(activity->id==lynx::MediaActivityBridge::kId)return lynx::v3::Scene::Media;
+    if(activity->id==lynx::FocusTimer::kId)return lynx::v3::Scene::Timer;
+    if(activity->id==lynx::FileShelf::kId)return lynx::v3::Scene::Shelf;
+    return lynx::v3::Scene::Idle;
+}
+lynx::v3::Layout currentV3Layout() {
+    const bool handle=g.activities.view()==lynx::View::Ambient &&
+        g.v3.idle==lynx::v3::IdleMode::Adaptive && !g.peekIdle;
+    return lynx::v3::layout(g.placement,g.activities.view(),currentV3Scene(),handle);
+}
+lynx::v3::Motion effectiveMotion() {
+    return g.reduced?lynx::v3::Motion::Reduced:g.v3.motion;
+}
+lynx::v3::PaintState currentV3Paint() {
+    lynx::v3::PaintState p;
+    p.layout=currentV3Layout();
+    p.view=g.activities.view();
+    p.center=g.v3.center;
+    p.playing=currentV3Scene()==lynx::v3::Scene::Timer ?
+        g.focus.state()==lynx::FocusTimer::State::Running:g.mediaSnapshot.playing;
+    p.canPrevious=g.mediaSnapshot.canPrevious;
+    p.canToggle=g.mediaSnapshot.canToggle;
+    p.canNext=g.mediaSnapshot.canNext;
+    p.mediaDurationMs=g.mediaSnapshot.durationMs;
+    p.mediaPositionMs=g.mediaSnapshot.positionMs;
+    if(g.mediaSnapshot.playing && g.mediaSnapshot.measuredAtMs && p.mediaDurationMs>0)
+        p.mediaPositionMs=std::min<std::int64_t>(p.mediaDurationMs,
+             p.mediaPositionMs+static_cast<std::int64_t>(
+                 GetTickCount64()-g.mediaSnapshot.measuredAtMs));
+    p.focusDuration=g.focus.durationSeconds();
+    p.focusRemaining=g.focus.remainingSeconds(GetTickCount64());
+    p.focused=g.focusedAction;
+    SYSTEMTIME local{};
+    GetLocalTime(&local);
+    wchar_t now[12]{};
+    swprintf_s(now,L"%02u:%02u",local.wHour,local.wMinute);
+    p.time=now;
+    constexpr const wchar_t* days[]{L"SUN",L"MON",L"TUE",L"WED",L"THU",L"FRI",L"SAT"};
+    p.day=days[local.wDayOfWeek%7];
+    p.batteryKnown=g.powerKnown && g.power.BatteryLifePercent!=255 &&
+        g.power.BatteryFlag!=128;
+    p.battery=p.batteryKnown?g.power.BatteryLifePercent:0;
+    p.charging=g.powerKnown && g.power.ACLineStatus==1;
+    p.title=g.mediaSnapshot.title;
+    p.subtitle=g.mediaSnapshot.artist;
+    if(const auto activity=g.activities.primary()) {
+        if(p.layout.scene==lynx::v3::Scene::Shelf)p.title=g.shelf.firstName();
+        if(p.layout.scene==lynx::v3::Scene::Timer)p.title=activity->title;
+    }
+    p.notice=g.activities.transientText();
+    p.hasSecondary=g.activities.view()==lynx::View::Compact &&
+        g.activities.secondary().has_value();
+    p.secondaryLabel=p.hasSecondary?g.activities.secondary()->title:L"";
+    return p;
 }
 
 void diagnostic(const char* operation, DWORD error = 0,
