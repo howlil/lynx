@@ -349,3 +349,20 @@ Stage: feat/m4b-render-accessibility stacked on M4-A. This is not a final native
 - Actual comparison of Windows.UI.Composition candidate A and DirectComposition candidate B has NOT been implemented or performed in this milestone. ADR-001 compositor selection stays OPEN. Performance claims must include CPU/RAM sampler, frame pacing and GPU ETW traces, identical hardware/DPI/workloads, alpha click-through, focus, device loss and curved shoulder quality.
 
 Evidence: Windows/Linux CI can validate compilation, pure context-action transitions, UIA interface symbols and PowerShell comparison fixture. Windows narrator focus semantics, actual screen-reader behavior and native GPU measurements remain unverified.
+
+
+## M4-C record — composition candidate A feasibility (24 October 2026)
+
+**ADR-001 remains OPEN.** The user-accepted v3 shell is still based on the layered GDI+ HWND; it is not replaced in this branch. A new standalone lynx_composition_probe.exe is added for a controlled native compositor experiment.
+
+**Candidate A runtime:** Win32 topmost tool HWND + WS_EX_NOREDIRECTIONBITMAP, UI-thread DispatcherQueueController, Windows.UI.Composition DesktopWindowTarget, ShapeVisual, CompositionPathGeometry, Direct2D IGeometrySource2DInterop. Floating and Top-attached use the agreed size targets and concave shoulder geometry. Native PathKeyFrameAnimation morphs between Ambient and Expanded. No Electron, WebView, cloud, remote telemetry or elevation.
+
+**Isolation:** the candidate is shape-only. It does NOT include real clock/power/media, text rendering, activity controls, full UI Automation or File Shelf. This is NOT a full shell replacement. QPC shape-submission cost cannot be compared directly with GDI+ complete-frame latency.
+
+**Critical input and animation risks:** WS_EX_NOREDIRECTIONBITMAP does not make an HWND transparent to input. WM_NCHITTEST consults a Direct2D geometry for static shape hit testing; HTTRANSPARENT is not guaranteed to deliver input to a different process. The candidate deliberately ignores clicks or further retarget requests during a morph, because the compositor intermediate shape is not synchronized with the host CPU hit test geometry. Both are real gaps against the agreed LYNX acceptance contract, not completed functionality.
+
+**Resource protocol:** on graceful exit, candidate writes %TEMP%\lynx-composition-metrics.csv with QPC time to build path and submit compositor animation, not actual rendered frames or GPU latency. GDI+ measurements include text, complete CPU frame drawing and UpdateLayeredWindow. Same CSV schema does not mean comparable workload. Before selecting a winner, match real content, input, frame presentation, idle CPU, working set, battery and error recovery.
+
+**Validation gates:** Windows CI compilation is not proof of actual visible pixels. On physical Windows 11, test no rectangle in transparent region, cross-process click-through in Explorer/browser, morphology/curve seams at 100/125/150/200% scaling, focus, rapid retargeting, device loss, monitor changes, HDR and sleep/resume. Candidate A needs feature and input parity before default activation. Evaluate DirectComposition/Direct2D separately if A cannot meet the requirements.
+
+Primary references: Microsoft Visual Layer Win32 tutorial, HelloVectors C++ sample and Windows Desktop Window Manager input best practices.
