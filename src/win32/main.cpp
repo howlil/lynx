@@ -234,21 +234,18 @@ void syncAccessibleState() {
     state.count=state.expanded?items.count:0;
     state.focused=g.focusedAction;
     const float ratio=scale();
-    const float origin=2.0f;
-    const float w=g.width.value();
-    const float y=g.offset.value()+125.0f;
+    const auto positions=currentV3Layout();
     for(int index=0;index<state.count;index++) {
         const auto action=items.at(index);
         if(!action)continue;
-        const float left=origin+w-(state.count==1?85.0f:
-                                          index==0?168.0f:88.0f);
-        const float width=state.count==1?63.0f:index==0?72.0f:66.0f;
-        const int x=state.screen.left+static_cast<int>(std::lround(left*ratio));
-        const int yy=state.screen.top+static_cast<int>(std::lround(y*ratio));
-        const int xx=state.screen.left+static_cast<int>(std::lround((left+width)*ratio));
-        const int bottom=state.screen.top+static_cast<int>(std::lround((y+31.0f)*ratio));
+        const auto b=positions.actions[index];
+        const int left=state.screen.left+static_cast<int>(std::lround((2.f+b.x)*ratio));
+        const int top=state.screen.top+static_cast<int>(
+            std::lround((g.offset.value()+b.y)*ratio));
+        const int right=left+static_cast<int>(std::lround(b.w*ratio));
+        const int bottom=top+static_cast<int>(std::lround(b.h*ratio));
         state.actions[index]={action->action,std::wstring(action->name),
-                              RECT{x,yy,xx,bottom}};
+                              RECT{left,top,right,bottom},action->enabled};
     }
     const auto before=g.uiaProvider->snapshot();
     const bool changed=before.count!=state.count ||
@@ -341,8 +338,8 @@ void timerAtMinuteBoundary() {
 }
 
 void setTargets() {
-    const auto geo = lynx::target(g.placement, g.activities.view());
-    if (g.reduced) {
+    const auto geo=currentV3Layout().geometry;
+    if (effectiveMotion()==lynx::v3::Motion::Reduced) {
         g.width.snap(geo.width);
         g.height.snap(geo.height);
         g.shoulder.snap(geo.shoulder);
@@ -531,6 +528,13 @@ void refresh() {
     setTargets();
     drawFrame();
     syncAccessibleState(); // Hidden has no draw, but must disappear from UIA tree.
+    const auto current=g.activities.primary();
+    const bool mediaVisible=current &&
+        current->id==lynx::MediaActivityBridge::kId &&
+        g.mediaSnapshot.playing &&
+        g.activities.view()!=lynx::View::Hidden;
+    if(mediaVisible)SetTimer(g.hwnd,kV3TickTimer,300,nullptr);
+    else KillTimer(g.hwnd,kV3TickTimer);
 }
 
 void setExpanded(bool wantExpanded) {
@@ -857,8 +861,10 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             const auto preferences=lynx::WindowsSettingsStore::load();
             g.placement=preferences.placement;
+            g.v3=preferences.v3;
             if (preferences.hasReducedMotionOverride)
                 g.reduced=preferences.reducedMotion;
+            if(g.v3.motion==lynx::v3::Motion::Reduced)g.reduced=true;
             // Prepare springs at the persisted placement before the first frame.
             const auto initialGeometry=lynx::target(g.placement,lynx::View::Ambient);
             g.width.snap(initialGeometry.width);
@@ -1026,6 +1032,19 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             break;
         case WM_TIMER:
             if (wp==kFocusTimer) {timerFocusTick();return 0;}
+            if (wp==kV3TickTimer) {
+                if(g.activities.view()==lynx::View::Compact ||
+                   g.activities.view()==lynx::View::Expanded)drawFrame();
+                return 0;
+            }
+            if(wp==kV3PeekTimer) {
+                KillTimer(hwnd,kV3PeekTimer);
+                if(!g.activities.expanded()) {
+                    g.peekIdle=false;
+                    refresh();
+                }
+                return 0;
+            }
             if (wp==kClockTimer) { timerAtMinuteBoundary(); drawFrame(); return 0; }
             if (wp==kTransientTimer) {
                 const auto now=GetTickCount64();
@@ -1046,8 +1065,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 const ULONGLONG now=GetTickCount64();
                 const float seconds=static_cast<float>(now-g.previousFrame)/1000.0f;
                 g.previousFrame=now;
-                g.width.step(seconds); g.height.step(seconds);
-                g.shoulder.step(seconds); g.offset.step(seconds);
+                const auto stiffness=lynx::v3::stiffness(effectiveMotion());
+                const auto damping=lynx::v3::damping(effectiveMotion());
+                g.width.step(seconds,stiffness,damping);
+                g.height.step(seconds,stiffness,damping);
+                g.shoulder.step(seconds,stiffness,damping);
+                g.offset.step(seconds,stiffness,damping);
                 if (!g.width.moving() && !g.height.moving() &&
                     !g.shoulder.moving() && !g.offset.moving()) KillTimer(hwnd,kAnimationTimer);
                 drawFrame();
@@ -1121,6 +1144,8 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 g.dropTarget=nullptr;
             }
             KillTimer(hwnd,kFocusTimer);
+            KillTimer(hwnd,kV3TickTimer);
+            KillTimer(hwnd,kV3PeekTimer);
             g.mediaProvider.reset(); // join MTA before HWND is destroyed
             MSG unconsumed{};
             while (PeekMessageW(&unconsumed,hwnd,kMediaMessage,kMediaMessage,PM_REMOVE))
