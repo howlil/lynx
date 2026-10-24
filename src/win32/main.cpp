@@ -674,7 +674,12 @@ void reconcileFullscreen() {
     reconcileMonitor();
     HWND foreground=GetForegroundWindow();
     if(foreground==g.hwnd || g.trayMenuOpen)return;
-    if(g.activities.expanded() && foreground && foreground!=g.hwnd) {
+    if((g.activities.expanded() || g.expandedNotice) &&
+       foreground && foreground!=g.hwnd) {
+        if(g.expandedNotice) {
+            g.expandedNotice=false;
+            g.activities.expireTransient(g.transientToken);
+        }
         // Outside desktop click dismisses the expanded surface. Do not
         // activate/focus LYNX while another application is foreground.
         g.activities.collapse();
@@ -1085,6 +1090,10 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             const auto oldTitle=g.mediaSnapshot.title;
             const auto oldArtist=g.mediaSnapshot.artist;
             const auto oldCanToggle=g.mediaSnapshot.canToggle;
+            const auto oldCanNext=g.mediaSnapshot.canNext;
+            const auto oldCanPrevious=g.mediaSnapshot.canPrevious;
+            const auto oldPosition=g.mediaSnapshot.positionMs;
+            const auto oldDuration=g.mediaSnapshot.durationMs;
             const auto oldError=g.mediaSnapshot.error;
             onMediaSnapshot(std::move(*media));
             if (previousView!=g.activities.view() ||
@@ -1094,6 +1103,10 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 oldTitle!=g.mediaSnapshot.title ||
                 oldArtist!=g.mediaSnapshot.artist ||
                 oldCanToggle!=g.mediaSnapshot.canToggle ||
+                oldCanNext!=g.mediaSnapshot.canNext ||
+                oldCanPrevious!=g.mediaSnapshot.canPrevious ||
+                oldPosition!=g.mediaSnapshot.positionMs ||
+                oldDuration!=g.mediaSnapshot.durationMs ||
                 oldError!=g.mediaSnapshot.error)
                 refresh();
             return 0;
@@ -1220,6 +1233,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                         previous.ACLineStatus != g.power.ACLineStatus;
                     if (chargingChanged && g.power.ACLineStatus == 1) {
                         showTransient(L"Power connected",2800);
+                    } else if(g.powerKnown && g.power.ACLineStatus!=1 &&
+                              g.power.BatteryLifePercent!=255 &&
+                              g.power.BatteryLifePercent<=20 &&
+                              (!known || previous.BatteryLifePercent>20 ||
+                               previous.ACLineStatus==1)) {
+                        showTransient(L"Low battery",2900);
                     }
                     refresh();
                 }
