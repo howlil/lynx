@@ -41,6 +41,7 @@ public:
     WindowsMediaProvider& operator=(const WindowsMediaProvider&) = delete;
 
     ~WindowsMediaProvider() {
+        stopRequested_.store(true,std::memory_order_release);
         {
             std::lock_guard<std::mutex> guard(signal_->mutex);
             signal_->stopping = true;
@@ -101,6 +102,8 @@ private:
     auto waitForOs(Operation operation) -> decltype(operation.get()) {
         {
             std::lock_guard<std::mutex> guard(operationMutex_);
+            if(stopRequested_.load(std::memory_order_acquire))
+                winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_CANCELLED));
             pendingOperation_=operation.template as<winrt::Windows::Foundation::IAsyncInfo>();
         }
         try {
@@ -241,6 +244,7 @@ private:
 
     Sink sink_;
     std::mutex operationMutex_;
+    std::atomic<bool> stopRequested_{false};
     winrt::Windows::Foundation::IAsyncInfo pendingOperation_{nullptr};
     std::shared_ptr<Signals> signal_ = std::make_shared<Signals>();
     std::thread thread_;
