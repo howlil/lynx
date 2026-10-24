@@ -91,6 +91,7 @@ struct App {
     bool hiddenByDemo = false;
     bool actualFullscreen = false;
     HWINEVENTHOOK foregroundHook = nullptr;
+    HWINEVENTHOOK foregroundGeometryHook = nullptr;
     HWND priorFocus = nullptr;
     int dpi = 96;
     ULONGLONG previousFrame = 0;
@@ -666,8 +667,10 @@ void revealFirstFile() {
 
 void foregroundCallback(HWINEVENTHOOK, DWORD event, HWND window,
                         LONG object, LONG child, DWORD, DWORD) {
-    if(event != EVENT_SYSTEM_FOREGROUND || object != OBJID_WINDOW ||
-       child != CHILDID_SELF || window == g.hwnd || !g.hwnd)return;
+    if(!g.hwnd || window==g.hwnd || object!=OBJID_WINDOW ||
+       child!=CHILDID_SELF)return;
+    if(event!=EVENT_SYSTEM_FOREGROUND && event!=EVENT_OBJECT_LOCATIONCHANGE)return;
+    if(event==EVENT_OBJECT_LOCATIONCHANGE && window!=GetForegroundWindow())return;
     PostMessageW(g.hwnd,kForegroundMessage,0,0);
 }
 
@@ -1301,6 +1304,10 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 UnhookWinEvent(g.foregroundHook);
                 g.foregroundHook=nullptr;
             }
+            if(g.foregroundGeometryHook) {
+                UnhookWinEvent(g.foregroundGeometryHook);
+                g.foregroundGeometryHook=nullptr;
+            }
             g.volume.reset(); // unregister Core Audio callbacks before COM teardown
             if(g.dropRegistered) {
                 RevokeDragDrop(hwnd);
@@ -1405,7 +1412,11 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     diagnostic("startup overlay shown");
     g.foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,
         nullptr,foregroundCallback,0,0,WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-    if(!g.foregroundHook)diagnostic("foreground hook failed",GetLastError());
+    g.foregroundGeometryHook=SetWinEventHook(
+        EVENT_OBJECT_LOCATIONCHANGE,EVENT_OBJECT_LOCATIONCHANGE,
+        nullptr,foregroundCallback,0,0,WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    if(!g.foregroundHook || !g.foregroundGeometryHook)
+        diagnostic("foreground hook failed",GetLastError());
     reconcileFullscreen();
     if(oleReady) {
         g.dropTarget=new (std::nothrow) lynx::FileDropTarget(
