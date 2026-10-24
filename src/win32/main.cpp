@@ -411,8 +411,11 @@ bool drawFrame() {
     updateDpiForMonitor();
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
-    const float canvasWidthDip = std::ceil(g.width.value()) + 4.0f;
-    const float canvasHeightDip = std::ceil(g.offset.value() + g.height.value()) + 3.0f;
+    const auto ui=currentV3Paint();
+    const bool bubble=ui.hasSecondary;
+    const float canvasWidthDip=std::ceil(g.width.value())+4.f+(bubble?48.f:0.f);
+    const float canvasHeightDip=std::ceil(g.offset.value()+
+        std::max(g.height.value(),bubble?44.f:0.f))+3.f;
     const int W = static_cast<int>(std::ceil(canvasWidthDip * dpi));
     const int H = static_cast<int>(std::ceil(canvasHeightDip * dpi));
     if (W <= 0 || H <= 0) { diagnostic("invalid surface dimensions"); return false; }
@@ -460,123 +463,25 @@ bool drawFrame() {
             const bool attached = g.placement == lynx::Placement::Attached;
             GraphicsPath shape;
             if (attached && shoulder > 0.2f) attachedPath(shape,x,y,w,h,shoulder);
-            else rounded(shape,x,y,w,h,std::min(h*.5f,22.0f));
+            else rounded(shape,x,y,w,h,std::min(h*.5f,lynx::v3::radius(ui.view)));
             SolidBrush background(Color(255,0,0,0));
             graphics.FillPath(&background,&shape);
             // All content stays within the interpolated shape while expanding.
             graphics.SetClip(&shape);
 
-            const float contentLeft = x + shoulder + 17.0f;
-            const float contentRight = x + w - shoulder - 16.0f;
-            const auto currentView = g.activities.view();
-
-            if (currentView == lynx::View::Ambient || currentView == lynx::View::Expanded) {
-                SYSTEMTIME now{};
-                GetLocalTime(&now);
-                wchar_t clockText[12]{};
-                swprintf_s(clockText, L"%02u:%02u", now.wHour, now.wMinute);
-                label(graphics,clockText,14.0f,contentLeft,y+10.0f,Color(255,245,245,247),true);
-
-                const float center = x+w*0.5f;
-                SolidBrush lens(Color(255,17,17,20));
-                Pen lensStroke(Color(255,30,30,35),0.8f);
-                graphics.FillEllipse(&lens,center-17.0f,y+16.0f,34.0f,10.0f);
-                graphics.DrawEllipse(&lensStroke,center-17.0f,y+16.0f,34.0f,10.0f);
-
-                const auto& power = g.power;
-                const bool read = g.powerKnown;
-                std::wstring powerText = L"";
-                if (read && power.BatteryFlag != 128 &&
-                    power.BatteryFlag != 255 && power.BatteryLifePercent != 255) {
-                    powerText = std::to_wstring(static_cast<int>(power.BatteryLifePercent)) + L"%";
-                } else if (read && power.ACLineStatus == 1) {
-                    powerText = L"AC";
-                }
-                if (!powerText.empty()) {
-                    const float textX = contentRight - (powerText.size()>2 ? 51.0f : 38.0f);
-                    const bool charging = read && power.ACLineStatus == 1 && power.BatteryFlag != 128;
-                    const Color accent = charging ? Color(255,48,209,88) : Color(255,245,245,247);
-                    label(graphics,powerText,12,textX,y+12,accent,true);
-                    Pen batteryPen(accent,1.5f);
-                    graphics.DrawRectangle(&batteryPen,contentRight-18.0f,y+15.0f,15.0f,10.0f);
-                    graphics.DrawLine(&batteryPen,contentRight-1,y+18,contentRight-1,y+22);
-                    if (read && power.BatteryLifePercent != 255 && power.BatteryFlag != 128) {
-                        SolidBrush chargeFill(accent);
-                        graphics.FillRectangle(&chargeFill,contentRight-16,y+17,
-                            11.0f*(power.BatteryLifePercent/100.0f),6.0f);
-                    }
-                }
-                if (currentView == lynx::View::Expanded) {
-                    const auto selected = g.activities.primary();
-                    Pen divider(Color(255,40,40,45),1.0f);
-                    graphics.DrawLine(&divider,x+20,y+48,x+w-20,y+48);
-                    label(graphics,selected ? selected->title : L"LYNX  /  NATIVE SHELL",13,x+23,y+64,
-                          Color(255,245,245,247),true);
-                    label(graphics,selected ? selected->subtitle :
-                          (g.mediaSnapshot.error.empty() ? L"Ambient clock and power are live Windows data." :
-                           L"Media unavailable - see log / permissions"),12,
-                          x+23,y+94,Color(255,164,164,170));
-                    if (selected && selected->id==lynx::FocusTimer::kId) {
-                        GraphicsPath pauseButton,resetButton;
-                        rounded(pauseButton,x+w-168.0f,y+125.0f,72.0f,31.0f,13.0f);
-                        rounded(resetButton,x+w-88.0f,y+125.0f,66.0f,31.0f,13.0f);
-                        SolidBrush buttonBrush(Color(255,39,39,44));
-                        graphics.FillPath(&buttonBrush,&pauseButton);
-                        graphics.FillPath(&buttonBrush,&resetButton);
-                        label(graphics,g.focus.state()==lynx::FocusTimer::State::Running?
-                            L"Pause":L"Resume",11,x+w-155.0f,y+130.0f,Color(255,245,245,247),true);
-                        label(graphics,L"Reset",11,x+w-77.0f,y+130.0f,Color(255,245,245,247),true);
-                    } else if (selected && selected->id==lynx::FileShelf::kId) {
-                        GraphicsPath openButton,clearButton;
-                        rounded(openButton,x+w-168.0f,y+125.0f,72.0f,31.0f,13.0f);
-                        rounded(clearButton,x+w-88.0f,y+125.0f,66.0f,31.0f,13.0f);
-                        SolidBrush buttonBrush(Color(255,39,39,44));
-                        graphics.FillPath(&buttonBrush,&openButton);
-                        graphics.FillPath(&buttonBrush,&clearButton);
-                        label(graphics,L"Reveal",11,x+w-156.0f,y+130.0f,Color(255,245,245,247),true);
-                        label(graphics,L"Clear",11,x+w-76.0f,y+130.0f,Color(255,245,245,247),true);
-                    } else if (selected && selected->id==lynx::MediaActivityBridge::kId &&
-                        g.mediaSnapshot.available && g.mediaSnapshot.canToggle) {
-                        GraphicsPath action;
-                        rounded(action,x+w-85.0f,y+125.0f,63.0f,31.0f,13.0f);
-                        SolidBrush buttonBrush(Color(255,39,39,44));
-                        graphics.FillPath(&buttonBrush,&action);
-                        label(graphics,g.mediaSnapshot.playing ? L"Pause" : L"Play",
-                              12,x+w-74.0f,y+130.0f,Color(255,245,245,247),true);
-                    }
-                    if(!selected)
-                        label(graphics,L"Drop files here · Right-click for actions",11,
-                              x+23,y+120,Color(255,140,140,148));
-                    const auto actions=currentActions();
-                    if(g.focusedAction>=0 && g.focusedAction<actions.count) {
-                        const float buttonX=x+w-(actions.count==1?85.0f:
-                            g.focusedAction==0?168.0f:88.0f);
-                        const float buttonW=actions.count==1?63.0f:
-                            g.focusedAction==0?72.0f:66.0f;
-                        GraphicsPath focusContour;
-                        rounded(focusContour,buttonX-2.0f,y+123.0f,
-                                buttonW+4.0f,35.0f,14.0f);
-                        Pen focusStroke(Color(255,10,132,255),1.8f);
-                        graphics.DrawPath(&focusStroke,&focusContour);
-                    }
-                    label(graphics,L"Renderer: layered alpha spike; compositor undecided",10,
-                          x+23,y+153,Color(255,115,115,122));
-                }
-            } else if (currentView == lynx::View::Compact) {
-                SolidBrush cover(Color(255,68,97,165));
-                graphics.FillEllipse(&cover,x+shoulder+10.0f,y+8.0f,26.0f,26.0f);
-                const auto selected = g.activities.primary();
-                label(graphics,selected ? selected->title : L"Activity",12,
-                      x+shoulder+46,y+10,Color(255,245,245,247),true);
-                if (g.activities.secondary()) {
-                    SolidBrush indicator(Color(255,10,132,255));
-                    graphics.FillEllipse(&indicator,contentRight-6.0f,y+17.0f,6.0f,6.0f);
-                }
-            } else if (currentView == lynx::View::Transient) {
-                label(graphics,g.activities.transientText(),13,contentLeft,y+15,
-                      Color(255,48,209,88),true);
-            }
+            // Content comes from the HTML v3 per-scene renderer.
+            // Reveal after shape expansion so text and controls do not clip
+            // or jump into place before the host reaches the target size.
+            const auto target=currentV3Layout().geometry;
+            const bool ready=ui.view!=lynx::View::Expanded ||
+                (w>=target.width*.90f && h>=target.height*.83f);
+            if(ready)lynx::v3::paint(graphics,ui,x,y,w,h);
             graphics.ResetClip();
+            if(bubble) {
+                const auto second=g.activities.secondary();
+                lynx::v3::secondaryBubble(graphics,x+w+8.f,y+8.f,
+                    second && second->id==lynx::FocusTimer::kId);
+            }
         }
     }
 
@@ -596,9 +501,11 @@ bool drawFrame() {
     if (!GetMonitorInfoW(display,&monitor)) {
         monitor.rcMonitor = RECT{0,0,GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN)};
     }
+    // Center the capsule, not its optional trailing secondary-activity bubble.
+    const int capsuleWidthPx=static_cast<int>(std::ceil((g.width.value()+4.f)*dpi));
     POINT dst{monitor.rcMonitor.left +
-                  ((monitor.rcMonitor.right-monitor.rcMonitor.left)-W)/2,
-              monitor.rcMonitor.top};
+        ((monitor.rcMonitor.right-monitor.rcMonitor.left)-capsuleWidthPx)/2,
+        monitor.rcMonitor.top};
     POINT src{0,0};
     SIZE size{W,H};
     BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
