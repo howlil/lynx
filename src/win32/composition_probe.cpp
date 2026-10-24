@@ -108,7 +108,8 @@ struct State {
     HMONITOR monitor=nullptr;
     float dpiScale=1.f;
     bool attached=false,expanded=false,animating=false;
-    lynx::Geometry current{};
+    lynx::Geometry current{},morphFrom{},morphTo{};
+    ULONGLONG morphStartTick=0;
     winrt::com_ptr<ID2D1Factory> factory;
     winrt::com_ptr<ID2D1PathGeometry> hitGeometry;
     Windows::System::DispatcherQueueController queue{nullptr};
@@ -230,6 +231,29 @@ void installStaticPath() {
     g.shapeGeometry.Path(g.currentPath);
 }
 
+lynx::Geometry lerpGeometry(lynx::Geometry a,lynx::Geometry b,float t) {
+    t=std::clamp(t,0.0f,1.0f);
+    return {a.width+(b.width-a.width)*t,
+            a.height+(b.height-a.height)*t,
+            a.shoulder+(b.shoulder-a.shoulder)*t,
+            a.topOffset+(b.topOffset-a.topOffset)*t};
+}
+
+void interruptMorph() {
+    if(!g.animating)return;
+    const auto elapsed=GetTickCount64()-g.morphStartTick;
+    const float t=std::min(1.0f,static_cast<float>(elapsed)/
+                                     static_cast<float>(kDurationMs));
+    const auto interpolated=lerpGeometry(g.morphFrom,g.morphTo,t);
+    KillTimer(g.hwnd,kMorphTimer);
+    g.shapeGeometry.StopAnimation(L"Path");
+    g.current=interpolated;
+    g.hitGeometry=buildGeometry(interpolated,g.attached);
+    g.currentPath=makePath(g.hitGeometry);
+    g.shapeGeometry.Path(g.currentPath);
+    g.animating=false;
+}
+
 void finishMorph() {
     KillTimer(g.hwnd,kMorphTimer);
     g.shapeGeometry.StopAnimation(L"Path");
@@ -242,11 +266,14 @@ void finishMorph() {
     g.animating=false;
 }
 void animateMorph() {
-    if(g.animating)finishMorph(); // cancel previous target before retarget
+    interruptMorph(); // sample in-flight geometry instead of snapping to target
     g.expanded=!g.expanded;
     const auto desired=lynx::target(g.attached?lynx::Placement::Attached:
         lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
         lynx::View::Ambient);
+    g.morphFrom=g.current;
+    g.morphTo=desired;
+    g.morphStartTick=GetTickCount64();
     g.timing.record([&] {
         g.nextHit=buildGeometry(desired,g.attached);
         g.nextPath=makePath(g.nextHit);
@@ -279,7 +306,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(!g.animating)animateMorph();
             return 0;
         case WM_RBUTTONUP:
-            if(g.animating)finishMorph();
+            if(g.animating)interruptMorph();
             g.attached=!g.attached;
             installStaticPath();
             return 0;
@@ -287,7 +314,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(wp==kQuitHotkey) {DestroyWindow(hwnd);return 0;}
             if(wp==kExpandHotkey)animateMorph();
             if(wp==kPlacementHotkey) {
-                if(g.animating)finishMorph();
+                if(g.animating)interruptMorph();
                 g.attached=!g.attached;installStaticPath();
             }
             return 0;
