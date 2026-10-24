@@ -172,6 +172,31 @@ winrt::com_ptr<ID2D1PathGeometry> buildGeometry(lynx::Geometry geo,bool attached
     return result;
 }
 
+// Headless D2D geometry contract: runs in Windows CI without opening the
+// compositor window. It proves path topology is present and basic containment,
+// NOT input routing through the OS window manager.
+bool geometrySelfTest() {
+    for(const bool attached:{false,true}) {
+        for(const auto view:{lynx::View::Ambient,lynx::View::Expanded}) {
+            const auto geo=lynx::target(attached?lynx::Placement::Attached:
+                lynx::Placement::Floating,view);
+            const auto path=buildGeometry(geo,attached);
+            const float left=(kFrameW-geo.width)*.5f;
+            const float mid=left+geo.width*.5f;
+            const float middleY=geo.topOffset+geo.height*.5f;
+            BOOL inside=FALSE,outside=TRUE,above=TRUE;
+            if(FAILED(path->FillContainsPoint({mid,middleY},nullptr,0.25f,&inside)) ||
+               FAILED(path->FillContainsPoint({left-12.f,middleY},nullptr,0.25f,&outside)) ||
+               FAILED(path->FillContainsPoint({mid,geo.topOffset-6.f},nullptr,0.25f,&above)) ||
+               !inside || outside || above)return false;
+            float area=0.f;
+            if(FAILED(path->ComputeArea(nullptr,0.25f,&area)) || area < 1500.f)
+                return false;
+        }
+    }
+    return true;
+}
+
 CompositionPath makePath(winrt::com_ptr<ID2D1PathGeometry> const& geometry) {
     return CompositionPath(winrt::make<GeoSource>(
         geometry.as<ID2D1Geometry>()));
@@ -293,6 +318,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         winrt::init_apartment(winrt::apartment_type::single_threaded);
         check_hresult(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
                                         g.factory.put()));
+        if(wcsstr(GetCommandLineW(),L"--self-test")!=nullptr)
+            return geometrySelfTest()?0:7;
         WNDCLASSW wc{};
         wc.hInstance=instance;
         wc.lpszClassName=L"LYNX_COMPOSITION_M4C_PROBE";
