@@ -3,6 +3,7 @@
 #include "../src/core/file_shelf.hpp"
 #include "../src/core/fullscreen_policy.hpp"
 #include "../src/core/context_actions.hpp"
+#include "../src/core/geometry_morph.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -244,6 +245,28 @@ int main() {
     assert(contextActions(View::Expanded,FileShelf::kId,
         FocusTimer::State::Ready,false,false,false).count==0);
     assert(focusActions.at(-1)==nullptr && focusActions.at(2)==nullptr);
+
+    // Composition retarget uses the currently interpolated shape, not the
+    // stale 350ms endpoint, even when placement and expansion both change.
+    GeometryMorph morph;
+    morph.snap(target(Placement::Floating,View::Ambient));
+    auto old=morph.retarget(target(Placement::Floating,View::Expanded),1000,350);
+    assert(old.width==232.0f);
+    const auto midpoint=morph.sample(1175);
+    assert(midpoint.width>232.0f && midpoint.width<336.0f);
+    assert(!morph.finished(1175));
+    const auto pivot=morph.retarget(target(Placement::Attached,View::Ambient),1175,350);
+    assert(std::abs(pivot.width-midpoint.width)<0.001f);
+    assert(std::abs(pivot.shoulder-midpoint.shoulder)<0.001f);
+    const auto quarter=morph.sample(1262);
+    assert(quarter.shoulder>0 && quarter.shoulder<16);
+    assert(quarter.topOffset<13 && quarter.topOffset>0);
+    assert(!morph.finished(1524));
+    assert(morph.finished(1525));
+    morph.settle();
+    assert(!morph.active());
+    assert(std::abs(morph.sample(999999).width-264.0f)<0.001f);
+    assert(std::abs(morph.sample(999999).shoulder-16.0f)<0.001f);
 
     std::cout << "lynx core: geometry, lifecycle, media, timer and shelf PASS\n";
 }
