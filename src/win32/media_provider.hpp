@@ -175,7 +175,6 @@ private:
                         if (observed && observedRegistered) {
                             observed.PlaybackInfoChanged(playbackToken);
                             observed.MediaPropertiesChanged(metadataToken);
-                observed.TimelinePropertiesChanged(timelineToken);
                             observed.TimelinePropertiesChanged(timelineToken);
                         }
                         observedRegistered = false;
