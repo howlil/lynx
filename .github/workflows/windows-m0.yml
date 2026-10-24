@@ -1,7 +1,7 @@
 name: LYNX Native CI
 on:
   push:
-    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core", "feat/m2-windows-providers", "feat/m3-general-utilities"]
+    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core", "feat/m2-windows-providers", "feat/m3-general-utilities", "feat/m4-runtime-hardening"]
   pull_request:
 jobs:
   windows-build:
@@ -12,6 +12,18 @@ jobs:
         run: cmake -S . -B build -A x64
       - name: Compile
         run: cmake --build build --config Release --parallel
+      - name: Verify runtime sampler PowerShell parses
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./scripts/measure-runtime.ps1),
+            [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
       - name: Core tests
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Upload Windows feasibility executable

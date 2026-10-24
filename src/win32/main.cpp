@@ -1,4 +1,5 @@
 #include "../core/media_activity.hpp"
+#include "../core/fullscreen_policy.hpp"
 #include "../core/focus_timer.hpp"
 #include "../core/file_shelf.hpp"
 #include "volume_feedback.hpp"
@@ -12,6 +13,7 @@
 #include <oleauto.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shellscalingapi.h>
 #include <windowsx.h>
 #include <gdiplus.h>
 #include <UIAutomation.h>
@@ -38,6 +40,8 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUiInvokeMessage = WM_APP + 2;
 constexpr UINT kMediaMessage = WM_APP + 3;
 constexpr UINT kVolumeMessage = WM_APP + 4;
+constexpr UINT kForegroundMessage = WM_APP + 5;
+UINT gTaskbarRestarted = 0;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
 constexpr float kCanvasWidthDip = 440.0f;
@@ -68,10 +72,13 @@ struct App {
     std::uint64_t transientToken = 0;
     ULONGLONG transientDeadline = 0;
     bool hiddenByDemo = false;
+    bool actualFullscreen = false;
+    HWINEVENTHOOK foregroundHook = nullptr;
     HWND priorFocus = nullptr;
     int dpi = 96;
     ULONGLONG previousFrame = 0;
     HMONITOR chosenMonitor = nullptr;
+    HMONITOR dpiMonitor = nullptr;
     bool firstFrame = true;
     IRawElementProviderSimple* uiaProvider = nullptr;
     std::unique_ptr<lynx::WindowsMediaProvider> mediaProvider;
@@ -207,6 +214,19 @@ void diagnostic(const char* operation, DWORD error = 0,
     CloseHandle(file);
 }
 
+void updateDpiForMonitor() {
+    if(g.chosenMonitor == g.dpiMonitor)return;
+    g.dpiMonitor=g.chosenMonitor;
+    UINT x=96,y=96;
+    if(g.chosenMonitor &&
+       SUCCEEDED(GetDpiForMonitor(g.chosenMonitor,MDT_EFFECTIVE_DPI,&x,&y)) &&
+       x>0) {
+        g.dpi=static_cast<int>(x);
+    } else {
+        g.dpi=g.hwnd ? static_cast<int>(GetDpiForWindow(g.hwnd)) : 96;
+        if(g.dpi<=0)g.dpi=96;
+    }
+}
 float scale() { return static_cast<float>(g.dpi) / 96.0f; }
 
 void readPower() {
@@ -341,6 +361,7 @@ void label(Graphics& graphics, const std::wstring& text, float px, float x, floa
 
 bool drawFrame() {
     if (g.activities.view() == lynx::View::Hidden) return true;
+    updateDpiForMonitor();
     const float dpi = scale();
     // Tight HWND: no invisible 440x260 rectangle covering desktop interaction.
     const float canvasWidthDip = std::ceil(g.width.value()) + 4.0f;
@@ -621,6 +642,62 @@ void revealFirstFile() {
     CoTaskMemFree(file);
 }
 
+
+void foregroundCallback(HWINEVENTHOOK, DWORD event, HWND window,
+                        LONG object, LONG child, DWORD, DWORD) {
+    if(event != EVENT_SYSTEM_FOREGROUND || object != OBJID_WINDOW ||
+       child != CHILDID_SELF || window == g.hwnd || !g.hwnd)return;
+    PostMessageW(g.hwnd,kForegroundMessage,0,0);
+}
+
+void reconcileMonitor() {
+    MONITORINFO check{sizeof(check)};
+    if(g.chosenMonitor && GetMonitorInfoW(g.chosenMonitor,&check))return;
+    // The saved HMONITOR can be invalid after unplugging a display.
+    // Choose a live display and never keep positioning against dead pixels.
+    POINT pointer{};
+    GetCursorPos(&pointer);
+    g.chosenMonitor=MonitorFromPoint(pointer,MONITOR_DEFAULTTOPRIMARY);
+}
+
+void reconcileFullscreen() {
+    reconcileMonitor();
+    HWND foreground=GetForegroundWindow();
+    if(foreground==g.hwnd)return; // LYNX may be active during an explicit action
+    bool fullscreen=false;
+    MONITORINFO monitor{sizeof(monitor)};
+    if(foreground && IsWindow(foreground) && IsWindowVisible(foreground) &&
+       !IsIconic(foreground) && GetMonitorInfoW(g.chosenMonitor,&monitor)) {
+        wchar_t className[80]{};
+        GetClassNameW(foreground,className,80);
+        if(wcscmp(className,L"Progman")!=0 &&
+           wcscmp(className,L"WorkerW")!=0 &&
+           wcscmp(className,L"Shell_TrayWnd")!=0) {
+            RECT bounds{};
+            if(GetWindowRect(foreground,&bounds)) {
+                fullscreen=lynx::coversMonitor(
+                   {bounds.left,bounds.top,bounds.right,bounds.bottom},
+                   {monitor.rcMonitor.left,monitor.rcMonitor.top,
+                    monitor.rcMonitor.right,monitor.rcMonitor.bottom});
+            }
+        }
+    }
+    const bool desiredHidden=g.hiddenByDemo || fullscreen;
+    if(fullscreen==g.actualFullscreen &&
+       g.activities.fullscreen()==desiredHidden)return;
+    g.actualFullscreen=fullscreen;
+    if(desiredHidden && g.activities.expanded()) {
+        // The foreground application already owns focus. Do not call
+        // SetForegroundWindow during this automatic hide.
+        g.activities.collapse();
+        auto style=GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
+        SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style | WS_EX_NOACTIVATE);
+        g.priorFocus=nullptr;
+    }
+    g.activities.setFullscreen(desiredHidden);
+    refresh();
+}
+
 void menu(HWND hwnd) {
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
@@ -678,6 +755,9 @@ void menu(HWND hwnd) {
             if (g.activities.fullscreen()) g.activities.setFullscreen(false);
             g.hiddenByDemo = false;
             g.chosenMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+            g.dpiMonitor=nullptr; // DPI must follow the destination display
+            // Manual recovery retargets the overlay to an existing monitor;
+            // fullscreen policy is still applied for its current foreground.
             diagnostic("show-on-this-monitor");
             break;
         case kFloating:
@@ -726,7 +806,7 @@ void menu(HWND hwnd) {
             break;
         case kFullscreenDemo:
             g.hiddenByDemo=!g.hiddenByDemo;
-            g.activities.setFullscreen(g.hiddenByDemo);
+            g.activities.setFullscreen(g.hiddenByDemo || g.actualFullscreen);
             break;
         case kQuit: DestroyWindow(hwnd); return;
         default: return;
@@ -745,6 +825,7 @@ void menu(HWND hwnd) {
         g.priorFocus=nullptr;
     }
     refresh();
+    PostMessageW(hwnd,kForegroundMessage,0,0); // reconcile after menu focus is restored
 }
 
 void addTray(HWND hwnd) {
@@ -763,6 +844,10 @@ void removeTray(HWND hwnd) {
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
+    if(gTaskbarRestarted && msg==gTaskbarRestarted) {
+        addTray(hwnd); // Explorer restarted: recover notification icon
+        return 0;
+    }
     switch(msg) {
         case WM_CREATE: {
             g.hwnd=hwnd;
@@ -853,6 +938,14 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case kVolumeMessage: {
             if(!g.volume)return 0;
+            if(wp==1) {
+                // A headset/unplug/speaker switch resets the HUD baseline.
+                // Do not announce a spurious volume change across devices.
+                if(!g.volume->rebind())diagnostic("volume endpoint unavailable");
+                g.volumeState=g.volume->read();
+                g.volumeInitialized=g.volumeState.available;
+                return 0;
+            }
             const auto now=g.volume->read();
             if(!now.available)return 0;
             const bool changed=g.volumeInitialized &&
@@ -956,6 +1049,12 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             drawFrame();
             return 0;
         case WM_POWERBROADCAST:
+            if(wp==PBT_APMRESUMEAUTOMATIC || wp==PBT_APMRESUMESUSPEND) {
+                // Monotonic deadlines include sleep: reconcile immediately,
+                // not after the next one-second WM_TIMER.
+                timerFocusTick();
+                PostMessageW(hwnd,kForegroundMessage,0,0);
+            }
             if (wp==PBT_POWERSETTINGCHANGE || wp==PBT_APMPOWERSTATUSCHANGE ||
                 wp==PBT_APMRESUMEAUTOMATIC || wp==PBT_APMRESUMESUSPEND) {
                 // Cache hardware data once per change, never once per animation frame.
@@ -979,10 +1078,17 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
             break;
         case WM_DISPLAYCHANGE:
-        case WM_DPICHANGED:
-            g.dpi=static_cast<int>(GetDpiForWindow(hwnd));
-            if (g.dpi<=0)g.dpi=96;
+            reconcileMonitor();
+            g.dpiMonitor=nullptr;
+            reconcileFullscreen();
             drawFrame();
+            return 0;
+        case WM_DPICHANGED:
+            g.dpiMonitor=nullptr;
+            drawFrame();
+            return 0;
+        case kForegroundMessage:
+            reconcileFullscreen();
             return 0;
         case WM_SETTINGCHANGE:
             drawFrame(); return 0;
@@ -991,6 +1097,10 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             else if (lp==WM_LBUTTONDBLCLK) toggleExpanded();
             return 0;
         case WM_DESTROY:
+            if(g.foregroundHook) {
+                UnhookWinEvent(g.foregroundHook);
+                g.foregroundHook=nullptr;
+            }
             g.volume.reset(); // unregister Core Audio callbacks before COM teardown
             if(g.dropRegistered) {
                 RevokeDragDrop(hwnd);
@@ -1051,6 +1161,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         if(oleReady)OleUninitialize();
         CloseHandle(singleton); return 1;
     }
+    gTaskbarRestarted=RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc=wndProc; wc.hInstance=instance;
     wc.lpszClassName=L"LYNX_M0_NATIVE_OVERLAY";
@@ -1087,6 +1198,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
     SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     diagnostic("startup overlay shown");
+    g.foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,
+        nullptr,foregroundCallback,0,0,WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    if(!g.foregroundHook)diagnostic("foreground hook failed",GetLastError());
+    reconcileFullscreen();
     if(oleReady) {
         g.dropTarget=new (std::nothrow) lynx::FileDropTarget(
             [hwnd](std::vector<std::wstring> paths) {
