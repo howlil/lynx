@@ -71,6 +71,7 @@ struct App {
     bool reduced = false;
     lynx::v3::Preferences v3{};
     bool peekIdle=false;
+    bool trayMenuOpen=false;
     bool lowBatteryNotified=false;
     std::uint64_t demoRevision = 0;
     std::uint64_t timerRevision = 0;
@@ -642,7 +643,16 @@ void reconcileMonitor() {
 void reconcileFullscreen() {
     reconcileMonitor();
     HWND foreground=GetForegroundWindow();
-    if(foreground==g.hwnd)return; // LYNX may be active during an explicit action
+    if(foreground==g.hwnd || g.trayMenuOpen)return;
+    if(g.activities.expanded() && foreground && foreground!=g.hwnd) {
+        // Outside desktop click dismisses the expanded surface. Do not
+        // activate/focus LYNX while another application is foreground.
+        g.activities.collapse();
+        g.focusedAction=-1;
+        const auto style=GetWindowLongPtrW(g.hwnd,GWL_EXSTYLE);
+        SetWindowLongPtrW(g.hwnd,GWL_EXSTYLE,style|WS_EX_NOACTIVATE);
+        g.priorFocus=nullptr;
+    }
     bool fullscreen=false;
     MONITORINFO monitor{sizeof(monitor)};
     if(foreground && IsWindow(foreground) && IsWindowVisible(foreground) &&
@@ -681,10 +691,21 @@ void invokeContextAction(lynx::ShellAction kind) {
     const auto actions=currentActions();
     bool supported=false;
     for(int i=0;i<actions.count;i++) {
-        if(actions.items[i].action==kind){supported=true;break;}
+        if(actions.items[i].action==kind && actions.items[i].enabled) {
+            supported=true;break;
+        }
     }
     if(!supported)return; // client or queued event may refer to an old action
     switch(kind) {
+        case lynx::ShellAction::MediaPrevious:
+            if(g.mediaProvider)g.mediaProvider->skipPrevious();
+            break;
+        case lynx::ShellAction::MediaNext:
+            if(g.mediaProvider)g.mediaProvider->skipNext();
+            break;
+        case lynx::ShellAction::StartFocus:
+            startFocus(25*60);
+            break;
         case lynx::ShellAction::MediaToggle:
             if(g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
                 g.mediaProvider->togglePlayPause();
@@ -748,8 +769,10 @@ void menu(HWND hwnd) {
     POINT pt{};
     GetCursorPos(&pt);
     SetForegroundWindow(hwnd);
+    g.trayMenuOpen=true;
     const UINT command=TrackPopupMenu(popup,TPM_RETURNCMD|TPM_RIGHTBUTTON,
                                        pt.x,pt.y,0,hwnd,nullptr);
+    g.trayMenuOpen=false;
     DestroyMenu(popup);
     PostMessageW(hwnd,WM_NULL,0,0);
     switch (command) {
@@ -888,17 +911,20 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (g.activities.view() != lynx::View::Expanded) return MA_NOACTIVATE;
             break;
         case WM_LBUTTONUP: {
+            const auto positions=currentV3Layout();
+            const float px=static_cast<float>(GET_X_LPARAM(lp))/scale()-2.f;
+            const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale()-g.offset.value();
+            if(g.activities.view()==lynx::View::Compact &&
+               lynx::v3::inside(positions.secondary,px,py)) {
+                if(const auto other=g.activities.secondary())
+                    openActivity(other->id);
+                return 0;
+            }
             if(g.activities.view()==lynx::View::Expanded) {
                 const auto actions=currentActions();
-                const float px=static_cast<float>(GET_X_LPARAM(lp))/scale();
-                const float py=static_cast<float>(GET_Y_LPARAM(lp))/scale();
                 for(int index=0;index<actions.count;index++) {
-                    const float left=2.0f+g.width.value()-
-                        (actions.count==1?85.0f:index==0?168.0f:88.0f);
-                    const float width=actions.count==1?63.0f:index==0?72.0f:66.0f;
-                    if(px>=left && px<left+width &&
-                       py>=g.offset.value()+125.0f &&
-                       py<g.offset.value()+156.0f) {
+                    if(lynx::v3::inside(positions.actions[index],px,py)) {
+                        if(!actions.items[index].enabled)return 0;
                         g.focusedAction=index;
                         invokeContextAction(actions.items[index].action);
                         syncAccessibleState();
@@ -909,6 +935,16 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             toggleExpanded();
             return 0;
         }
+        case WM_MOUSEMOVE:
+            if(g.v3.idle==lynx::v3::IdleMode::Adaptive &&
+               g.activities.view()==lynx::View::Ambient) {
+                if(!g.peekIdle) {
+                    g.peekIdle=true;
+                    refresh();
+                }
+                SetTimer(hwnd,kV3PeekTimer,1800,nullptr);
+            }
+            return 0;
         case WM_RBUTTONUP:
             menu(hwnd);
             return 0;
@@ -920,7 +956,8 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case kUiActionMessage: {
             const auto current=g.activities.primary();
-            if(current && current->generation==static_cast<std::uint64_t>(lp))
+            if((current && current->generation==static_cast<std::uint64_t>(lp)) ||
+               (!current && lp==0))
                 invokeContextAction(static_cast<lynx::ShellAction>(wp));
             return 0;
         }
@@ -1020,7 +1057,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 if((wp==VK_RETURN || wp==VK_SPACE) && actions.count>0) {
                     const int selected=g.focusedAction<0?0:g.focusedAction;
                     if(auto action=actions.at(selected)) {
-                        invokeContextAction(action->action);
+                        if(action->enabled)invokeContextAction(action->action);
                         return 0;
                     }
                 }
