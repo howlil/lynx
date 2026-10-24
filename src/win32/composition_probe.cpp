@@ -12,6 +12,7 @@
 // https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/tree/master/cpp/HelloVectors
 
 #include "../core/island_core.hpp"
+#include "../core/geometry_morph.hpp"
 #include <windows.h>
 #include <windowsx.h>
 #include <d2d1.h>
@@ -27,6 +28,8 @@
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Composition.Desktop.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -42,6 +45,7 @@ using namespace Windows::Foundation::Numerics;
 constexpr int kFrameW=440;
 constexpr int kFrameH=245;
 constexpr UINT_PTR kMorphTimer=200;
+constexpr UINT kHitSampleMs=16;
 constexpr int kExpandHotkey=201,kPlacementHotkey=202,kQuitHotkey=203;
 constexpr DWORD kDurationMs=350;
 
@@ -107,8 +111,8 @@ struct State {
     HWND hwnd=nullptr;
     HMONITOR monitor=nullptr;
     float dpiScale=1.f;
-    bool attached=false,expanded=false,animating=false;
-    lynx::Geometry current{};
+    bool attached=false,expanded=false;
+    lynx::GeometryMorph morph;
     winrt::com_ptr<ID2D1Factory> factory;
     winrt::com_ptr<ID2D1PathGeometry> hitGeometry;
     Windows::System::DispatcherQueueController queue{nullptr};
@@ -118,9 +122,51 @@ struct State {
     CompositionPathGeometry shapeGeometry{nullptr};
     CompositionPath currentPath{nullptr};
     CompositionPath nextPath{nullptr};
-    winrt::com_ptr<ID2D1PathGeometry> nextHit;
     Measurement timing;
 } g;
+
+// Flatten the exact D2D path into a Win32 region. SetWindowRgn clips both
+// visible pixels and the HWND's input area, including across processes.
+// A region has window-local *physical* pixel coordinates.
+class PathRegionSink final:public ID2D1SimplifiedGeometrySink {
+public:
+    explicit PathRegionSink(float dpi):dpi_(dpi){}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
+        if(!output)return E_POINTER;
+        *output=nullptr;
+        if(iid==__uuidof(IUnknown)||iid==__uuidof(ID2D1SimplifiedGeometrySink))
+            *output=static_cast<ID2D1SimplifiedGeometrySink*>(this);
+        else return E_NOINTERFACE;
+        AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override{return ++refs_;}
+    ULONG STDMETHODCALLTYPE Release() override{return --refs_;}
+    void STDMETHODCALLTYPE SetFillMode(D2D1_FILL_MODE) override {}
+    void STDMETHODCALLTYPE SetSegmentFlags(D2D1_PATH_SEGMENT) override {}
+    void STDMETHODCALLTYPE BeginFigure(D2D1_POINT_2F start,D2D1_FIGURE_BEGIN) override {
+        vertices.clear();
+        add(start);
+    }
+    void STDMETHODCALLTYPE AddLines(const D2D1_POINT_2F* points,UINT32 count) override {
+        for(UINT32 i=0;i<count;i++)add(points[i]);
+    }
+    void STDMETHODCALLTYPE AddBeziers(const D2D1_BEZIER_SEGMENT*,UINT32) override {
+        invalid_=true; // Simplify(LINES) must flatten Beziers for us.
+    }
+    void STDMETHODCALLTYPE EndFigure(D2D1_FIGURE_END) override {}
+    HRESULT STDMETHODCALLTYPE Close() override {return invalid_?E_FAIL:S_OK;}
+    std::vector<POINT> vertices;
+private:
+    void add(D2D1_POINT_2F p) {
+        POINT scaled{static_cast<LONG>(std::lround(p.x*dpi_)),
+                     static_cast<LONG>(std::lround(p.y*dpi_))};
+        if(vertices.empty()||vertices.back().x!=scaled.x||
+           vertices.back().y!=scaled.y)vertices.push_back(scaled);
+    }
+    std::atomic<ULONG> refs_{1};
+    float dpi_=1.f;
+    bool invalid_=false;
+};
 
 void addCubic(ID2D1GeometrySink* sink,D2D1_POINT_2F a,D2D1_POINT_2F b,
               D2D1_POINT_2F end) {
@@ -195,6 +241,22 @@ bool geometrySelfTest() {
         }
     }
     return true;
+}
+
+void updateWindowRegion(lynx::Geometry const& geo) {
+    const auto path=buildGeometry(geo,geo.shoulder>0.01f);
+    PathRegionSink sink(g.dpiScale);
+    winrt::check_hresult(path->Simplify(D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,
+        nullptr,0.20f/g.dpiScale,&sink));
+    if(sink.vertices.size()<3)winrt::throw_hresult(E_FAIL);
+    HRGN region=CreatePolygonRgn(sink.vertices.data(),
+        static_cast<int>(sink.vertices.size()),WINDING);
+    if(!region)winrt::throw_last_error();
+    if(!SetWindowRgn(g.hwnd,region,TRUE)) {
+        DeleteObject(region); // transferred to USER32 only after success
+        winrt::throw_last_error();
+    }
+    g.hitGeometry=path;
 }
 
 CompositionPath makePath(winrt::com_ptr<ID2D1PathGeometry> const& geometry) {
