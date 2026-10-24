@@ -278,6 +278,13 @@ int main() {
     assert(mediaActions.at(1)->name==L"Pause media");
     assert(mediaActions.at(2)->action==S::MediaNext);
     assert(!mediaActions.at(2)->enabled);
+    assert(mediaActions.nextEnabled(-1)==0);
+    assert(mediaActions.nextEnabled(0)==1);
+    assert(mediaActions.nextEnabled(1)==0);
+    assert(mediaActions.nextEnabled(0,true)==1);
+    const auto noneEnabled=contextActions(View::Expanded,MediaActivityBridge::kId,
+        FocusTimer::State::Ready,false,false,false);
+    assert(noneEnabled.nextEnabled(-1)==-1);
     assert(!contextActions(View::Expanded,MediaActivityBridge::kId,
         FocusTimer::State::Ready,false,false,false).at(1)->enabled);
     assert(contextActions(View::Expanded,FileShelf::kId,
