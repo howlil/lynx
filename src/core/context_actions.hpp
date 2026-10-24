@@ -23,6 +23,16 @@ struct ContextActions {
     const ActionInfo* at(int index) const {
         return index>=0 && index<count?&items[static_cast<std::size_t>(index)]:nullptr;
     }
+    int nextEnabled(int previous,bool reverse=false) const {
+        if(!count)return -1;
+        // A disabled OS media action is visible, but not a keyboard stop.
+        if(previous<0)previous=reverse?0:count-1;
+        for(int step=1;step<=count;step++) {
+            const int index=(previous+count+(reverse?-step:step))%count;
+            if(items[static_cast<std::size_t>(index)].enabled)return index;
+        }
+        return -1;
+    }
 };
 
 // Identical action order in the v3 geometry, UIA, keyboard and pointer input.
