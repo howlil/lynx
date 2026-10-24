@@ -37,6 +37,16 @@ inline void text(Graphics& g,const std::wstring& str,float px,float x,float y,
     fmt.SetTrimming(StringTrimmingEllipsisCharacter);
     g.DrawString(str.c_str(),-1,&f,PointF(x,y),&fmt,&b);
 }
+inline void textBox(Graphics& g,const std::wstring& str,float px,
+                    float x,float y,float width,Color color=white(),bool heavy=false) {
+    if(width<=0)return;
+    Font font(L"Segoe UI",px,heavy?FontStyleBold:FontStyleRegular,UnitPixel);
+    SolidBrush brush(color);
+    StringFormat fmt;
+    fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+    fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+    g.DrawString(str.c_str(),-1,&font,RectF(x,y,width,px+10.f),&fmt,&brush);
+}
 inline void pill(GraphicsPath& path,float x,float y,float w,float h,float r) {
     r=std::clamp(r,0.5f,std::min(w,h)*.5f);
     const float d=r*2;
@@ -149,7 +159,8 @@ inline void compact(Graphics& g,const PaintState& p,float x,float y,float w,floa
     if(p.layout.scene==Scene::Media) {
         fillRound(g,lx,y+8,22,22,6,Color(255,95,90,150));
         drawMusic(g,lx+5,y+10,white());
-        text(g,p.title.empty()?L"Now Playing":p.title,11,lx+30,y+10,white(),true);
+        textBox(g,p.title.empty()?L"Now Playing":p.title,11,lx+30,y+10,
+                std::max(10.f,w-sh-84.f),white(),true);
         waveform(g,x+w-sh-31,y+19,p.playing);
     } else if(p.layout.scene==Scene::Timer) {
         drawTimer(g,lx+1,y+8,orange());
@@ -174,8 +185,9 @@ inline void media(Graphics& g,const PaintState& p,float x,float y,float w,float 
     Pen art(Color(100,255,210,200),6);g.DrawEllipse(&art,left+15,y+8,46.f,46.f);
     Pen arc(Color(100,212,174,233),5);g.DrawEllipse(&arc,left-12,y+38,51.f,51.f);
     drawMusic(g,left+20,y+31,white());
-    text(g,p.title.empty()?L"Now Playing":p.title,13,left+64,y+21,white(),true);
-    text(g,p.subtitle,10,left+64,y+43,secondary());
+    const float titleWidth=std::max(25.f,w-2*sh-132.f);
+    textBox(g,p.title.empty()?L"Now Playing":p.title,13,left+64,y+21,titleWidth,white(),true);
+    textBox(g,p.subtitle,10,left+64,y+43,titleWidth,secondary());
     waveform(g,x+w-sh-35,y+41,p.playing);
     const float trackX=left,trackW=w-2*sh-32;
     fillRound(g,trackX,y+80,trackW,4,2,Color(255,59,59,64));
