@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/island_core.hpp"
+#include "../core/v3_presentation.hpp"
 #include <windows.h>
 
 namespace lynx {
@@ -8,6 +9,7 @@ struct UserPreferences {
     Placement placement = Placement::Floating;
     bool reducedMotion = false;
     bool hasReducedMotionOverride = false;
+    v3::Preferences v3{};
 };
 
 class WindowsSettingsStore {
@@ -22,6 +24,12 @@ public:
             p.hasReducedMotionOverride = true;
             p.reducedMotion = raw == 1;
         }
+        if(read(L"IdlePolicy",raw) && raw<=1)
+            p.v3.idle=static_cast<v3::IdleMode>(raw);
+        if(read(L"CenterMode",raw) && raw<=2)
+            p.v3.center=static_cast<v3::CenterMode>(raw);
+        if(read(L"MotionPreset",raw) && raw<=2)
+            p.v3.motion=static_cast<v3::Motion>(raw);
         return p;
     }
 
@@ -30,6 +38,15 @@ public:
     }
     static bool saveReducedMotion(bool enabled) {
         return write(L"ReducedMotion", enabled ? 1u : 0u);
+    }
+    static bool saveIdleMode(v3::IdleMode value) {
+        return write(L"IdlePolicy",static_cast<DWORD>(value));
+    }
+    static bool saveCenterMode(v3::CenterMode value) {
+        return write(L"CenterMode",static_cast<DWORD>(value));
+    }
+    static bool saveMotion(v3::Motion value) {
+        return write(L"MotionPreset",static_cast<DWORD>(value));
     }
 private:
     static constexpr const wchar_t* kSubkey = L"Software\\LYNX";
