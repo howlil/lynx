@@ -41,11 +41,23 @@ public:
     WindowsMediaProvider& operator=(const WindowsMediaProvider&) = delete;
 
     ~WindowsMediaProvider() {
+        stopRequested_.store(true,std::memory_order_release);
         {
             std::lock_guard<std::mutex> guard(signal_->mutex);
             signal_->stopping = true;
         }
         signal_->cv.notify_one();
+        // Request cancellation of the pending WinRT operation before join.
+        // This is cooperative: OS implementations may not honor cancellation.
+        winrt::Windows::Foundation::IAsyncInfo pending{nullptr};
+        {
+            std::lock_guard<std::mutex> guard(operationMutex_);
+            pending=pendingOperation_;
+        }
+        if(pending) {
+            try { pending.Cancel(); }
+            catch(winrt::hresult_error const&) {}
+        }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -86,7 +98,29 @@ private:
         };
     }
 
-    static MediaSnapshot readSession(Session const& session) {
+    template<typename Operation>
+    auto waitForOs(Operation operation) -> decltype(operation.get()) {
+        {
+            std::lock_guard<std::mutex> guard(operationMutex_);
+            if(stopRequested_.load(std::memory_order_acquire))
+                winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+            pendingOperation_=operation.template as<winrt::Windows::Foundation::IAsyncInfo>();
+        }
+        try {
+            auto result=operation.get();
+            {
+                std::lock_guard<std::mutex> guard(operationMutex_);
+                pendingOperation_=nullptr;
+            }
+            return result;
+        } catch(...) {
+            std::lock_guard<std::mutex> guard(operationMutex_);
+            pendingOperation_=nullptr;
+            throw;
+        }
+    }
+
+    MediaSnapshot readSession(Session const& session) {
         MediaSnapshot snapshot;
         if (!session) return snapshot;
         snapshot.available = true;
@@ -98,7 +132,7 @@ private:
             snapshot.canToggle = controls && controls.IsPlayPauseToggleEnabled();
         }
         try {
-            const auto props = session.TryGetMediaPropertiesAsync().get();
+            const auto props = waitForOs(session.TryGetMediaPropertiesAsync());
             if (props) {
                 snapshot.title = props.Title().c_str();
                 snapshot.artist = props.Artist().c_str();
@@ -113,7 +147,7 @@ private:
     void run() noexcept {
         try {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
-            auto manager = Manager::RequestAsync().get();
+            auto manager = waitForOs(Manager::RequestAsync());
             Session observed{nullptr};
             winrt::event_token managerCurrent{};
             winrt::event_token managerSessions{};
@@ -162,7 +196,7 @@ private:
                         auto info = observed.GetPlaybackInfo();
                         if (info && info.Controls() && info.Controls().IsPlayPauseToggleEnabled()) {
                             // Windows decides whether the controlling app supports this.
-                            (void) observed.TryTogglePlayPauseAsync().get();
+                            (void) waitForOs(observed.TryTogglePlayPauseAsync());
                         }
                     }
                     auto snapshot = readSession(observed);
@@ -209,6 +243,9 @@ private:
     }
 
     Sink sink_;
+    std::mutex operationMutex_;
+    std::atomic<bool> stopRequested_{false};
+    winrt::Windows::Foundation::IAsyncInfo pendingOperation_{nullptr};
     std::shared_ptr<Signals> signal_ = std::make_shared<Signals>();
     std::thread thread_;
 };
