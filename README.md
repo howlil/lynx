@@ -4,6 +4,26 @@ A native Windows 11 Dynamic Island utility, starting with a **core feasibility e
 
 **Current status: M4-C compositor candidate A feasibility, stacked on M4-B/M4-A. Input and performance acceptance remain open; not a completed release.** Product and visual decisions are in [DESIGN.md](DESIGN.md), [.agents/product.md](.agents/product.md), and [.agents/engineering-design.md](.agents/engineering-design.md).
 
+## M5 — HTML v3 Native UI Parity (development branch)
+
+Visual and interaction source of truth: [original HTML v3 preview](design/reference/windows-island-apple-ambient-v3.html); implementation contract: [.agents/html-v3-parity.md](.agents/html-v3-parity.md).
+
+The stable native executable remains lynx_m0.exe. M5 does **not** replace it with the experimental Windows Composition probe. Layout and accessible hit targets are defined by src/core/v3_presentation.hpp; per-scene GDI+ drawing lives in src/win32/v3_visuals.hpp.
+
+- Ambient clock, native battery and Lens/Dot/Day center indicators. Optional adaptive minimal handle that reveals on hover.
+- Compact media (illustrative artwork, title, waveform), Focus timer (running/paused/countdown) and File Shelf.
+- Expanded Media: illustrated art, title/artist, OS-reported timeline, media previous/play/pause/next with command availability from GSMTC. Unknown duration displays --:--.
+- Expanded Timer: 89 DIP circular progress, remaining time and round Reset/Pause/Resume actions. Idle Expanded: large time/day/battery with functional Start Focus CTA. File Shelf: Reveal/Clear controls.
+- Two simultaneous activities show a trailing 36 DIP bubble that opens the other source without interrupting its state.
+- Real charging/low-battery/focus completion transient. Clicking the notification opens detail; dismiss and expiry restore non-interactive overlay state.
+- Click outside Expanded or press Escape to collapse. User-selected Floating/Top-attached, Smooth/Snappy/Reduced, persistent/adaptive idle, and Lens/Dot/Day are stored in HKCU settings.
+- Mouse hit targets and UIA button bounds derive from the same pure v3 layout. Controls unsupported by the current OS media source remain visible but disabled.
+- No synthetic 82% battery, fake playback position, simulated music source or clickable preview-only test environment in Release.
+
+**Deliberate native adaptations / known gaps:** the fully invisible floating adaptive browser hotspot becomes a discoverable native micro-handle; HTML's nonfunctional Try Music simulator becomes a working Start Focus action on idle; the illustrative album mark is not decoded from a real GSMTC thumbnail. Screen capture pixel parity, native audio device edge cases and smoothness across physical DPI scales are not verifiable in GitHub CI and require Windows acceptance.
+
+M5 acceptance: Windows/Linux portable geometry/action tests and Windows build should pass; visual parity, keyboard/Inspect/Narrator, real media controls, mouse passthrough, 100/125/150/200% scaling and CPU/GPU frame pacing need actual Windows 11 testing. Do not call M5 production-certified solely from CI.
+
 ## M4-C — Candidate A Win32 Windows.UI.Composition probe
 
 Branch: feat/m4c-composition-probe (stacked on M4-B). This is a **standalone shape/compositor feasibility executable**, not a switch of the production LYNX renderer.

@@ -16,6 +16,7 @@ struct AccessibleAction {
     ShellAction kind=ShellAction::None;
     std::wstring name;
     RECT screen{};
+    bool enabled=true;
 };
 struct AccessibleSnapshot {
     bool visible=true;
@@ -26,7 +27,7 @@ struct AccessibleSnapshot {
     std::uint64_t ownerGeneration=0;
     std::wstring name=L"LYNX Island";
     RECT screen{};
-    std::array<AccessibleAction,2> actions{};
+    std::array<AccessibleAction,3> actions{};
 };
 
 inline HRESULT setUiaName(VARIANT* value,const std::wstring& name) {
@@ -256,10 +257,13 @@ public:
                 return setUiaName(v,L"lynx.island.action."+std::to_wstring(index_));
             case UIA_IsControlElementPropertyId:
             case UIA_IsContentElementPropertyId:
-            case UIA_IsKeyboardFocusablePropertyId:
                 v->vt=VT_BOOL;v->boolVal=VARIANT_TRUE;return S_OK;
+            case UIA_IsKeyboardFocusablePropertyId:
+                v->vt=VT_BOOL;v->boolVal=live && s.actions[index_].enabled?
+                    VARIANT_TRUE:VARIANT_FALSE;return S_OK;
             case UIA_IsEnabledPropertyId:
-                v->vt=VT_BOOL;v->boolVal=live?VARIANT_TRUE:VARIANT_FALSE;return S_OK;
+                v->vt=VT_BOOL;v->boolVal=live && s.actions[index_].enabled?
+                    VARIANT_TRUE:VARIANT_FALSE;return S_OK;
             case UIA_IsOffscreenPropertyId:
                 v->vt=VT_BOOL;v->boolVal=live?VARIANT_FALSE:VARIANT_TRUE;return S_OK;
             case UIA_HasKeyboardFocusPropertyId:
@@ -325,6 +329,7 @@ public:
         auto s=root_->snapshot();
         HWND hwnd=root_->hwnd();
         if(!s.expanded || index_>=s.count || !hwnd ||
+           !s.actions[index_].enabled ||
            s.actions[index_].kind!=originalKind_ ||
            s.ownerId!=ownerId_ || s.ownerGeneration!=ownerGeneration_)
             return UIA_E_ELEMENTNOTAVAILABLE;
@@ -341,6 +346,7 @@ public:
         const auto s=root_->snapshot();
         HWND hwnd=root_->hwnd();
         if(!hwnd || !s.expanded || index_>=s.count ||
+           !s.actions[index_].enabled ||
            s.actions[index_].kind!=originalKind_ ||
            s.ownerId!=ownerId_ || s.ownerGeneration!=ownerGeneration_)
             return UIA_E_ELEMENTNOTAVAILABLE;

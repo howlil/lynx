@@ -3,6 +3,7 @@
 #include "../src/core/file_shelf.hpp"
 #include "../src/core/fullscreen_policy.hpp"
 #include "../src/core/context_actions.hpp"
+#include "../src/core/v3_presentation.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -218,31 +219,81 @@ int main() {
     assert(!coversMonitor({0,0,0,0},display)); // invalid rect
     assert(coversMonitor({1920,0,3840,1080},{1920,0,3840,1080}));
 
-    // Exactly the same contextual action contract drives UI, keyboard and UIA.
-    using S = ShellAction;
-    assert(contextActions(View::Ambient, FocusTimer::kId,
+    // HTML v3 per-scene dimension contract is separate from platform DPI.
+    using namespace lynx::v3;
+    for(auto placement:{Placement::Floating,Placement::Attached}) {
+        const float extra=placement==Placement::Attached?32.f:0.f;
+        assert(geometry(placement,View::Ambient,Scene::Idle).width==232.f+extra);
+        assert(geometry(placement,View::Ambient,Scene::Idle).height==42.f);
+        assert(geometry(placement,View::Compact,Scene::Media).width==182.f+extra);
+        assert(geometry(placement,View::Compact,Scene::Timer).height==38.f);
+        assert(geometry(placement,View::Expanded,Scene::Media).height==155.f);
+        assert(geometry(placement,View::Expanded,Scene::Timer).height==167.f);
+        assert(geometry(placement,View::Expanded,Scene::Idle).height==154.f);
+        assert(geometry(placement,View::Expanded,Scene::Alert).height==103.f);
+        assert(geometry(placement,View::Hidden,Scene::Media).width==0.f);
+        assert(geometry(placement,View::Ambient,Scene::Idle,true).width==
+            (placement==Placement::Attached?96.f:56.f));
+        for(auto scene:{Scene::Media,Scene::Timer,Scene::Shelf,Scene::Idle}) {
+            const auto l=layout(placement,View::Expanded,scene);
+            assert(l.count==(scene==Scene::Media?3:scene==Scene::Idle?1:2));
+            for(int i=0;i<l.count;i++) {
+                const auto box=l.actions[i];
+                assert(box.x>=0 && box.y>=0);
+                assert(box.x+box.w<=l.geometry.width);
+                assert(box.y+box.h<=l.geometry.height);
+                assert(inside(box,box.x+box.w/2,box.y+box.h/2));
+                assert(!inside(box,box.x-3,box.y-3));
+            }
+        }
+    }
+    assert(stiffness(Motion::Snappy)>stiffness(Motion::Smooth));
+    assert(damping(Motion::Snappy)>damping(Motion::Smooth));
+    assert(std::abs(focusProgress(750,1500)-0.5f)<0.001f);
+    assert(progressRatio(1500,3000)==0.5f);
+    assert(progressRatio(-500,3000)==0.f);
+    assert(progressRatio(4000,3000)==1.f);
+    assert(progressRatio(500,0)==0.f);
+
+    // One native action graph drives visible controls, UIA and pointer actions.
+    using S=ShellAction;
+    assert(contextActions(View::Ambient,FocusTimer::kId,
         FocusTimer::State::Running,true,true,true).count==0);
-    auto focusActions=contextActions(View::Expanded,FocusTimer::kId,
+    const auto focusActions=contextActions(View::Expanded,FocusTimer::kId,
         FocusTimer::State::Running,true,false,false);
     assert(focusActions.count==2);
-    assert(focusActions.at(0)->action==S::FocusToggle);
-    assert(focusActions.at(0)->name==L"Pause focus");
-    assert(focusActions.at(1)->action==S::FocusReset);
-    auto pausedActions=contextActions(View::Expanded,FocusTimer::kId,
+    assert(focusActions.at(0)->action==S::FocusReset);
+    assert(focusActions.at(1)->action==S::FocusToggle);
+    assert(focusActions.at(1)->name==L"Pause focus");
+    const auto pausedActions=contextActions(View::Expanded,FocusTimer::kId,
         FocusTimer::State::Paused,false,false,false);
-    assert(pausedActions.at(0)->name==L"Resume focus");
+    assert(pausedActions.at(1)->name==L"Resume focus");
     assert(contextActions(View::Expanded,FocusTimer::kId,
         FocusTimer::State::Completed,false,false,false).count==0);
-    auto mediaActions=contextActions(View::Expanded,MediaActivityBridge::kId,
-        FocusTimer::State::Ready,true,true,false);
-    assert(mediaActions.count==1);
-    assert(mediaActions.at(0)->name==L"Pause media");
-    assert(contextActions(View::Expanded,MediaActivityBridge::kId,
-        FocusTimer::State::Ready,false,false,false).count==0);
+    const auto mediaActions=contextActions(View::Expanded,MediaActivityBridge::kId,
+        FocusTimer::State::Ready,true,true,false,true,false);
+    assert(mediaActions.count==3);
+    assert(mediaActions.at(0)->action==S::MediaPrevious);
+    assert(mediaActions.at(0)->enabled);
+    assert(mediaActions.at(1)->name==L"Pause media");
+    assert(mediaActions.at(2)->action==S::MediaNext);
+    assert(!mediaActions.at(2)->enabled);
+    assert(mediaActions.nextEnabled(-1)==0);
+    assert(mediaActions.nextEnabled(0)==1);
+    assert(mediaActions.nextEnabled(1)==0);
+    assert(mediaActions.nextEnabled(0,true)==1);
+    const auto noneEnabled=contextActions(View::Expanded,MediaActivityBridge::kId,
+        FocusTimer::State::Ready,false,false,false);
+    assert(noneEnabled.nextEnabled(-1)==-1);
+    assert(!contextActions(View::Expanded,MediaActivityBridge::kId,
+        FocusTimer::State::Ready,false,false,false).at(1)->enabled);
     assert(contextActions(View::Expanded,FileShelf::kId,
         FocusTimer::State::Ready,false,false,true).count==2);
     assert(contextActions(View::Expanded,FileShelf::kId,
         FocusTimer::State::Ready,false,false,false).count==0);
+    const auto idleActions=contextActions(View::Expanded,0,
+        FocusTimer::State::Ready,false,false,false);
+    assert(idleActions.count==1 && idleActions.at(0)->action==S::StartFocus);
     assert(focusActions.at(-1)==nullptr && focusActions.at(2)==nullptr);
 
     std::cout << "lynx core: geometry, lifecycle, media, timer and shelf PASS\n";

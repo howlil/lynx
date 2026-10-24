@@ -1,7 +1,7 @@
 name: LYNX Native CI
 on:
   push:
-    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core", "feat/m2-windows-providers", "feat/m3-general-utilities", "feat/m4-runtime-hardening", "feat/m4b-render-accessibility", "feat/m4c-composition-probe"]
+    branches: [master, "feat/m0-native-shell", "feat/m1-activity-core", "feat/m2-windows-providers", "feat/m3-general-utilities", "feat/m4-runtime-hardening", "feat/m4b-render-accessibility", "feat/m4c-composition-probe", "feat/m5-html-v3-parity"]
   pull_request:
 jobs:
   windows-build:
