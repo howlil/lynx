@@ -232,23 +232,6 @@ void animateMorph() {
     SetTimer(g.hwnd,kMorphTimer,kDurationMs+20,nullptr);
 }
 
-void createComposition() {
-    DispatcherQueueOptions options{sizeof(DispatcherQueueOptions),
-                                   DQTYPE_THREAD_CURRENT,DQTAT_COM_STA};
-    namespace abi=ABI::Windows::System;
-    winrt::check_hresult(CreateDispatcherQueueController(options,
-        reinterpret_cast<abi::IDispatcherQueueController**>(put_abi(g.queue))));
-    g.compositor=Compositor();
-    const auto interop=g.compositor.as<ABI::Windows::UI::Composition::Desktop::ICompositorDesktopInterop>();
-    winrt::check_hresult(interop->CreateDesktopWindowTarget(g.hwnd,true,
-        reinterpret_cast<ABI::Windows::UI::Composition::Desktop::IDesktopWindowTarget**>(
-            put_abi(g.target))));
-    g.visual=g.compositor.CreateShapeVisual();
-    g.visual.Size({static_cast<float>(kFrameW),static_cast<float>(kFrameH)});
-    g.target.Root(g.visual);
-    installStaticPath(); // requires shapeGeometry to be initialized below
-}
-
 LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     switch(msg) {
         case WM_NCHITTEST: {
