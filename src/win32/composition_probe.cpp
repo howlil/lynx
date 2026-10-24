@@ -218,6 +218,8 @@ winrt::com_ptr<ID2D1PathGeometry> buildGeometry(lynx::Geometry geo,bool attached
     return result;
 }
 
+HRGN buildNativeRegion(ID2D1PathGeometry* path,float dpi);
+
 // Headless D2D geometry contract: runs in Windows CI without opening the
 // compositor window. It proves path topology is present and basic containment,
 // NOT input routing through the OS window manager.
