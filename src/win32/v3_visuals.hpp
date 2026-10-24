@@ -37,8 +37,7 @@ inline void text(Graphics& g,const std::wstring& str,float px,float x,float y,
     fmt.SetTrimming(StringTrimmingEllipsisCharacter);
     g.DrawString(str.c_str(),-1,&f,PointF(x,y),&fmt,&b);
 }
-inline GraphicsPath pill(float x,float y,float w,float h,float r) {
-    GraphicsPath path;
+inline void pill(GraphicsPath& path,float x,float y,float w,float h,float r) {
     r=std::clamp(r,0.5f,std::min(w,h)*.5f);
     const float d=r*2;
     path.StartFigure();
@@ -47,13 +46,12 @@ inline GraphicsPath pill(float x,float y,float w,float h,float r) {
     path.AddArc(x,y+h-d,d,d,90,90);
     path.AddArc(x,y,d,d,180,90);
     path.CloseFigure();
-    return path;
 }
 inline void fillRound(Graphics& g,float x,float y,float w,float h,float r,Color c){
-    auto p=pill(x,y,w,h,r);SolidBrush b(c);g.FillPath(&b,&p);
+    GraphicsPath p;pill(p,x,y,w,h,r);SolidBrush b(c);g.FillPath(&b,&p);
 }
 inline void strokeRound(Graphics& g,float x,float y,float w,float h,float r,Color c,float line=1){
-    auto p=pill(x,y,w,h,r);Pen pen(c,line);g.DrawPath(&pen,&p);
+    GraphicsPath p;pill(p,x,y,w,h,r);Pen pen(c,line);g.DrawPath(&pen,&p);
 }
 inline void line(Graphics& g,float x1,float y1,float x2,float y2,Color c,float width=1.8f){
     Pen p(c,width);p.SetStartCap(LineCapRound);p.SetEndCap(LineCapRound);
