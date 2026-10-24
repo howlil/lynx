@@ -8,6 +8,7 @@
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Media.h>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -86,6 +87,20 @@ private:
         };
     }
 
+    // Do not block shutdown indefinitely on unresponsive external WinRT
+    // providers. wait_for performs ONE wait; on timeout we request
+    // cancellation and discard the operation (we do not wait twice).
+    template<typename Operation>
+    static auto waitResult(Operation const& operation,
+        std::chrono::milliseconds timeout) -> decltype(operation.GetResults()) {
+        using winrt::Windows::Foundation::AsyncStatus;
+        if(operation.wait_for(timeout)==AsyncStatus::Started) {
+            operation.Cancel();
+            throw winrt::hresult_error(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+        }
+        return operation.GetResults();
+    }
+
     static MediaSnapshot readSession(Session const& session) {
         MediaSnapshot snapshot;
         if (!session) return snapshot;
@@ -98,7 +113,8 @@ private:
             snapshot.canToggle = controls && controls.IsPlayPauseToggleEnabled();
         }
         try {
-            const auto props = session.TryGetMediaPropertiesAsync().get();
+            const auto props = waitResult(session.TryGetMediaPropertiesAsync(),
+                                          std::chrono::milliseconds(1500));
             if (props) {
                 snapshot.title = props.Title().c_str();
                 snapshot.artist = props.Artist().c_str();
@@ -113,7 +129,8 @@ private:
     void run() noexcept {
         try {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
-            auto manager = Manager::RequestAsync().get();
+            auto manager = waitResult(Manager::RequestAsync(),
+                                      std::chrono::milliseconds(2500));
             Session observed{nullptr};
             winrt::event_token managerCurrent{};
             winrt::event_token managerSessions{};
@@ -162,7 +179,8 @@ private:
                         auto info = observed.GetPlaybackInfo();
                         if (info && info.Controls() && info.Controls().IsPlayPauseToggleEnabled()) {
                             // Windows decides whether the controlling app supports this.
-                            (void) observed.TryTogglePlayPauseAsync().get();
+                            (void) waitResult(observed.TryTogglePlayPauseAsync(),
+                                              std::chrono::milliseconds(1500));
                         }
                     }
                     auto snapshot = readSession(observed);
