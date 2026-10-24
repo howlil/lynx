@@ -51,6 +51,7 @@ constexpr UINT kUiFocusMessage = WM_APP + 7;
 UINT gTaskbarRestarted = 0;
 constexpr UINT kTrayId = 1;
 constexpr int kHotkeyId = 1;
+constexpr int kSecondActivityHotkeyId = 2;
 constexpr float kCanvasWidthDip = 440.0f;
 constexpr float kCanvasHeightDip = 260.0f;
 
@@ -59,7 +60,7 @@ enum MenuId : UINT {
     kTimerDemo, kFocus5, kFocus25, kFocusPause, kFocusReset,
     kShelfOpen, kShelfClear, kTransientDemo, kReducedMotion, kFullscreenDemo, kToggleMedia, kQuit,
     kIdlePersistent, kIdleAdaptive, kCenterLens, kCenterDot, kCenterDay,
-    kMotionSmooth, kMotionSnappy
+    kMotionSmooth, kMotionSnappy, kSecondaryOpen
 };
 
 struct App {
@@ -782,6 +783,8 @@ void menu(HWND hwnd) {
     AppendMenuW(popup,MF_STRING,kTimerDemo,L"Simulated focus");
 #endif
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING | (g.activities.secondary()?MF_ENABLED:MF_GRAYED),
+                kSecondaryOpen,L"Open second activity · Ctrl+Alt+B");
     AppendMenuW(popup,MF_STRING,kFocus25,L"Start Focus · 25 min");
     AppendMenuW(popup,MF_STRING,kFocus5,L"Start Focus · 5 min");
     AppendMenuW(popup,MF_STRING | (
@@ -868,6 +871,9 @@ void menu(HWND hwnd) {
         case kTimerDemo:
             g.activities.upsert(lynx::Activity{2,1,++g.timerRevision,20,
                   L"Focus timer",L"25:00  /  Demo in progress",true});
+            break;
+        case kSecondaryOpen:
+            if(const auto second=g.activities.secondary())openActivity(second->id);
             break;
         case kFocus25: startFocus(25*60); break;
         case kFocus5: startFocus(5*60); break;
@@ -987,6 +993,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if (!g.powerSourceSubscription || !g.batterySubscription)
                 diagnostic("power subscribe failed",GetLastError());
             RegisterHotKey(hwnd,kHotkeyId,MOD_CONTROL|MOD_ALT,VK_SPACE);
+            RegisterHotKey(hwnd,kSecondActivityHotkeyId,MOD_CONTROL|MOD_ALT,'B');
             addTray(hwnd);
             timerAtMinuteBoundary();
             diagnostic("WM_CREATE complete");
@@ -1035,6 +1042,9 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case WM_HOTKEY:
             if (wp==kHotkeyId) toggleExpanded();
+            if(wp==kSecondActivityHotkeyId) {
+                if(const auto second=g.activities.secondary())openActivity(second->id);
+            }
             return 0;
         case kUiInvokeMessage:
             toggleExpanded();
@@ -1321,6 +1331,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             KillTimer(hwnd,kClockTimer);
             KillTimer(hwnd,kTransientTimer);
             UnregisterHotKey(hwnd,kHotkeyId);
+            UnregisterHotKey(hwnd,kSecondActivityHotkeyId);
             removeTray(hwnd);
             PostQuitMessage(0);
             return 0;
