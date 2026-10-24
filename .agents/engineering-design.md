@@ -366,3 +366,26 @@ Evidence: Windows/Linux CI can validate compilation, pure context-action transit
 **Validation gates:** Windows CI compilation is not proof of actual visible pixels. On physical Windows 11, test no rectangle in transparent region, cross-process click-through in Explorer/browser, morphology/curve seams at 100/125/150/200% scaling, focus, rapid retargeting, device loss, monitor changes, HDR and sleep/resume. Candidate A needs feature and input parity before default activation. Evaluate DirectComposition/Direct2D separately if A cannot meet the requirements.
 
 Primary references: Microsoft Visual Layer Win32 tutorial, HelloVectors C++ sample and Windows Desktop Window Manager input best practices.
+
+
+## Post-merge design-thinking remediation — fullscreen, media and composition input (24 October 2026)
+
+### Shapes and successful execution graph (A)
+
+- `ForegroundChange` / `ForegroundLocationChange` (WinEvent callback, many) → foreground HWND check → `WM_APP` post → UI-thread monitor-coverage evaluation → Activity Coordinator Hidden/previous state → redraw. No polling or arbitrary-thread renderer access. Window hooks belong to the HWND and are unregistered before window destruction.
+- `MediaRequest` → WinRT async operation on dedicated MTA → bounded wait → current normalized MediaSnapshot → UI-thread PostMessage. Metadata failure falls back to playback state. On timeout, request `Cancel()` and release the operation; worker progresses to shutdown. Asynchronous waits are bounded, but a misbehaving synchronous provider call still requires hardware fault-injection to prove total shutdown latency.
+- `GeometryMorph` (from/to, started tick, duration) → sample monotonic interpolated geometry → retarget new destination at current pose → path keyframe animation submitted to Windows Composition → native HWND region reconciled from the same physical-pixel D2D path every ~16ms during motion → region owned by USER32 after successful SetWindowRgn. CPU region work exists only during morph, not Ambient idle.
+- `Release UI` → feature controls only; renderer experiment diagnostics are debug-only.
+
+### Failures (E) / interruption / resource policy (R)
+
+- Missing WinEvent hook → log and keep explicit tray recovery; no elevated hook or injection.
+- WinRT async wait expiration → `Cancel`, translate to HRESULT error or metadata fallback; no retry storm. Cancellation requests do not certify driver/provider cooperation. `thread_.join` remains owner synchronization.
+- Region creation/simplification/SetWindowRgn failure → throw hresult_error into existing probe boundary; never silently treat the entire bounding rectangle as safe click-through. On SetWindowRgn success, **do not** delete the region handle (Windows owns it).
+- Rapid retarget → replace animation from sampled current geometry and continue in same UI thread. Multi-DPI region vertices are physical pixels while composition geometry remains DIP. In-flight input-clip updates are a known CPU cost and possible jitter source requiring ETW traces.
+
+### Verification and open acceptance
+
+- Pure C++ morph tests prove interrupting halfway without jumping back to last endpoint.
+- Windows headless Direct2D tests prove basic polygon contour inclusion/exclusion at 100%, 150%, 200%; they **do not** prove actual Explorer/browser mouse passthrough, display compositing, or DWM frame timing.
+- Windows CI validates native compilation and limited contracts; manual F11, desktop click-through, rapid morph interactions, USB/Bluetooth and provider hang fault-injection are required before production acceptance. ADR-001 compositor remains open.

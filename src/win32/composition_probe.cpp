@@ -12,6 +12,7 @@
 // https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/tree/master/cpp/HelloVectors
 
 #include "../core/island_core.hpp"
+#include "../core/geometry_morph.hpp"
 #include <windows.h>
 #include <windowsx.h>
 #include <d2d1.h>
@@ -27,6 +28,8 @@
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Composition.Desktop.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -42,6 +45,7 @@ using namespace Windows::Foundation::Numerics;
 constexpr int kFrameW=440;
 constexpr int kFrameH=245;
 constexpr UINT_PTR kMorphTimer=200;
+constexpr UINT kHitSampleMs=16;
 constexpr int kExpandHotkey=201,kPlacementHotkey=202,kQuitHotkey=203;
 constexpr DWORD kDurationMs=350;
 
@@ -107,8 +111,8 @@ struct State {
     HWND hwnd=nullptr;
     HMONITOR monitor=nullptr;
     float dpiScale=1.f;
-    bool attached=false,expanded=false,animating=false;
-    lynx::Geometry current{};
+    bool attached=false,expanded=false;
+    lynx::GeometryMorph morph;
     winrt::com_ptr<ID2D1Factory> factory;
     winrt::com_ptr<ID2D1PathGeometry> hitGeometry;
     Windows::System::DispatcherQueueController queue{nullptr};
@@ -118,9 +122,51 @@ struct State {
     CompositionPathGeometry shapeGeometry{nullptr};
     CompositionPath currentPath{nullptr};
     CompositionPath nextPath{nullptr};
-    winrt::com_ptr<ID2D1PathGeometry> nextHit;
     Measurement timing;
 } g;
+
+// Flatten the exact D2D path into a Win32 region. SetWindowRgn clips both
+// visible pixels and the HWND's input area, including across processes.
+// A region has window-local *physical* pixel coordinates.
+class PathRegionSink final:public ID2D1SimplifiedGeometrySink {
+public:
+    explicit PathRegionSink(float dpi):dpi_(dpi){}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** output) override {
+        if(!output)return E_POINTER;
+        *output=nullptr;
+        if(iid==__uuidof(IUnknown)||iid==__uuidof(ID2D1SimplifiedGeometrySink))
+            *output=static_cast<ID2D1SimplifiedGeometrySink*>(this);
+        else return E_NOINTERFACE;
+        AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override{return ++refs_;}
+    ULONG STDMETHODCALLTYPE Release() override{return --refs_;}
+    void STDMETHODCALLTYPE SetFillMode(D2D1_FILL_MODE) override {}
+    void STDMETHODCALLTYPE SetSegmentFlags(D2D1_PATH_SEGMENT) override {}
+    void STDMETHODCALLTYPE BeginFigure(D2D1_POINT_2F start,D2D1_FIGURE_BEGIN) override {
+        vertices.clear();
+        add(start);
+    }
+    void STDMETHODCALLTYPE AddLines(const D2D1_POINT_2F* points,UINT32 count) override {
+        for(UINT32 i=0;i<count;i++)add(points[i]);
+    }
+    void STDMETHODCALLTYPE AddBeziers(const D2D1_BEZIER_SEGMENT*,UINT32) override {
+        invalid_=true; // Simplify(LINES) must flatten Beziers for us.
+    }
+    void STDMETHODCALLTYPE EndFigure(D2D1_FIGURE_END) override {}
+    HRESULT STDMETHODCALLTYPE Close() override {return invalid_?E_FAIL:S_OK;}
+    std::vector<POINT> vertices;
+private:
+    void add(D2D1_POINT_2F p) {
+        POINT scaled{static_cast<LONG>(std::lround(p.x*dpi_)),
+                     static_cast<LONG>(std::lround(p.y*dpi_))};
+        if(vertices.empty()||vertices.back().x!=scaled.x||
+           vertices.back().y!=scaled.y)vertices.push_back(scaled);
+    }
+    std::atomic<ULONG> refs_{1};
+    float dpi_=1.f;
+    bool invalid_=false;
+};
 
 void addCubic(ID2D1GeometrySink* sink,D2D1_POINT_2F a,D2D1_POINT_2F b,
               D2D1_POINT_2F end) {
@@ -172,6 +218,8 @@ winrt::com_ptr<ID2D1PathGeometry> buildGeometry(lynx::Geometry geo,bool attached
     return result;
 }
 
+HRGN buildNativeRegion(ID2D1PathGeometry* path,float dpi);
+
 // Headless D2D geometry contract: runs in Windows CI without opening the
 // compositor window. It proves path topology is present and basic containment,
 // NOT input routing through the OS window manager.
@@ -192,9 +240,43 @@ bool geometrySelfTest() {
             float area=0.f;
             if(FAILED(path->ComputeArea(nullptr,0.25f,&area)) || area < 1500.f)
                 return false;
+            // Independent native input-region proof. This does NOT simulate
+            // an actual click on another process; only region geometry.
+            for(const float dpi:{1.0f,1.5f,2.0f}) {
+                HRGN region=buildNativeRegion(path.get(),dpi);
+                const bool center=PtInRegion(region,
+                    static_cast<int>(std::lround(mid*dpi)),
+                    static_cast<int>(std::lround(middleY*dpi)))!=0;
+                const bool outsideRegion=PtInRegion(region,
+                    static_cast<int>(std::lround((left-12.f)*dpi)),
+                    static_cast<int>(std::lround(middleY*dpi)))!=0;
+                DeleteObject(region);
+                if(!center || outsideRegion)return false;
+            }
         }
     }
     return true;
+}
+
+HRGN buildNativeRegion(ID2D1PathGeometry* path,float dpi) {
+    PathRegionSink sink(dpi);
+    winrt::check_hresult(path->Simplify(
+        D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,nullptr,0.20f/dpi,&sink));
+    if(sink.vertices.size()<3)winrt::throw_hresult(E_FAIL);
+    HRGN region=CreatePolygonRgn(sink.vertices.data(),
+        static_cast<int>(sink.vertices.size()),WINDING);
+    if(!region)winrt::throw_last_error();
+    return region;
+}
+
+void updateWindowRegion(lynx::Geometry const& geo) {
+    const auto path=buildGeometry(geo,geo.shoulder>0.01f);
+    HRGN region=buildNativeRegion(path.get(),g.dpiScale);
+    if(!SetWindowRgn(g.hwnd,region,TRUE)) {
+        DeleteObject(region); // transferred to USER32 only after success
+        winrt::throw_last_error();
+    }
+    g.hitGeometry=path;
 }
 
 CompositionPath makePath(winrt::com_ptr<ID2D1PathGeometry> const& geometry) {
@@ -220,86 +302,89 @@ void applyDpiAndPlacement() {
     }
 }
 
-void installStaticPath() {
-    const auto geo=lynx::target(g.attached?lynx::Placement::Attached:
+lynx::Geometry destination() {
+    return lynx::target(g.attached?lynx::Placement::Attached:
         lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
         lynx::View::Ambient);
-    g.current=geo;
-    g.hitGeometry=buildGeometry(geo,g.attached);
-    g.currentPath=makePath(g.hitGeometry);
+}
+
+void installStaticPath() {
+    const auto geo=destination();
+    g.morph.snap(geo);
+    g.currentPath=makePath(buildGeometry(geo,geo.shoulder>0.01f));
     g.shapeGeometry.Path(g.currentPath);
 }
 
 void finishMorph() {
     KillTimer(g.hwnd,kMorphTimer);
     g.shapeGeometry.StopAnimation(L"Path");
-    g.hitGeometry=std::move(g.nextHit);
-    g.currentPath=g.nextPath;
+    const auto geo=g.morph.destination();
+    g.morph.settle();
+    g.currentPath=makePath(buildGeometry(geo,geo.shoulder>0.01f));
     g.shapeGeometry.Path(g.currentPath);
-    g.current=lynx::target(g.attached?lynx::Placement::Attached:
-        lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
-        lynx::View::Ambient);
-    g.animating=false;
+    updateWindowRegion(geo);
 }
-void animateMorph() {
-    if(g.animating)finishMorph(); // no queued stale animation completion
-    g.expanded=!g.expanded;
-    const auto desired=lynx::target(g.attached?lynx::Placement::Attached:
-        lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
-        lynx::View::Ambient);
+
+void animateToTarget() {
+    // A new request is accepted even during an in-flight path animation.
+    // Starting shape is the interpolated pose, never the previous endpoint.
+    const auto now=GetTickCount64();
+    const auto from=g.morph.retarget(destination(),now,kDurationMs);
+    g.shapeGeometry.StopAnimation(L"Path");
+    g.currentPath=makePath(buildGeometry(from,from.shoulder>0.01f));
+    g.shapeGeometry.Path(g.currentPath);
     g.timing.record([&] {
-        g.nextHit=buildGeometry(desired,g.attached);
-        g.nextPath=makePath(g.nextHit);
+        g.nextPath=makePath(buildGeometry(destination(),g.attached));
         const auto animation=g.compositor.CreatePathKeyFrameAnimation();
         animation.Duration(std::chrono::milliseconds(kDurationMs));
         animation.InsertKeyFrame(0.f,g.currentPath);
         animation.InsertKeyFrame(1.f,g.nextPath);
         g.shapeGeometry.StartAnimation(L"Path",animation);
     });
-    g.animating=true;
-    SetTimer(g.hwnd,kMorphTimer,kDurationMs+20,nullptr);
+    updateWindowRegion(from);
+    SetTimer(g.hwnd,kMorphTimer,kHitSampleMs,nullptr);
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     switch(msg) {
-        case WM_NCHITTEST: {
-            if(g.animating || !g.hitGeometry)return HTTRANSPARENT;
-            POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-            ScreenToClient(hwnd,&pt);
-            const D2D1_POINT_2F local{
-                pt.x/g.dpiScale,pt.y/g.dpiScale
-            };
-            BOOL contains=FALSE;
-            if(SUCCEEDED(g.hitGeometry->FillContainsPoint(local,nullptr,0.25f,&contains))
-               && contains)return HTCLIENT;
-            // This is not a guarantee of cross-process click-through.
-            return HTTRANSPARENT;
-        }
+        case WM_NCHITTEST:
+            // SetWindowRgn is authoritative: points outside the region never
+            // target this HWND, even when the underlying app is another process.
+            return HTCLIENT;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
         case WM_LBUTTONUP:
-            if(!g.animating)animateMorph();
+            g.expanded=!g.expanded;
+            animateToTarget();
             return 0;
         case WM_RBUTTONUP:
-            if(!g.animating) {
-                g.attached=!g.attached;
-                installStaticPath();
-            }
+            g.attached=!g.attached;
+            animateToTarget();
             return 0;
         case WM_HOTKEY:
             if(wp==kQuitHotkey) {DestroyWindow(hwnd);return 0;}
-            if(g.animating)return 0;
-            if(wp==kExpandHotkey)animateMorph();
+            if(wp==kExpandHotkey) {
+                g.expanded=!g.expanded;
+                animateToTarget();
+            }
             if(wp==kPlacementHotkey) {
-                g.attached=!g.attached;installStaticPath();
+                g.attached=!g.attached;
+                animateToTarget();
             }
             return 0;
         case WM_TIMER:
-            if(wp==kMorphTimer && g.animating)finishMorph();
+            if(wp==kMorphTimer && g.morph.active()) {
+                const auto now=GetTickCount64();
+                if(g.morph.finished(now))finishMorph();
+                else updateWindowRegion(g.morph.sample(now));
+            }
             return 0;
         case WM_DPICHANGED:
-            if(g.visual)applyDpiAndPlacement();
-            return 0;
         case WM_DISPLAYCHANGE:
-            if(g.visual)applyDpiAndPlacement();
+            if(g.visual) {
+                applyDpiAndPlacement();
+                updateWindowRegion(g.morph.sample(GetTickCount64()));
+            }
             return 0;
         case WM_DESTROY:
             UnregisterHotKey(hwnd,kExpandHotkey);
@@ -355,6 +440,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         g.target.Root(g.visual);
         installStaticPath();
         applyDpiAndPlacement();
+        updateWindowRegion(g.morph.sample(GetTickCount64()));
 
         if(!RegisterHotKey(g.hwnd,kExpandHotkey,MOD_CONTROL|MOD_ALT,'I'))
             winrt::throw_last_error();
