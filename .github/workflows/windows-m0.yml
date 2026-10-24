@@ -40,6 +40,11 @@ jobs:
           ) | Set-Content -Path $fixture
           & ./scripts/compare-render-metrics.ps1 -Baseline $fixture -Candidate $fixture
           if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit 1 }
+      - name: Composition path geometry self-test
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath (Resolve-Path .\build\Release\lynx_composition_probe.exe) -ArgumentList '--self-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Composition geometry test returned $($p.ExitCode)" }
       - name: Core tests
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Upload Windows feasibility executable
