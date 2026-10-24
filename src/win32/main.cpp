@@ -761,8 +761,25 @@ void menu(HWND hwnd) {
     AppendMenuW(popup,MF_STRING,kFullscreenDemo,
                 g.hiddenByDemo?L"Restore from hidden":L"Simulate fullscreen hide");
 #endif
-    AppendMenuW(popup,MF_STRING | (g.reduced?MF_CHECKED:0),
-                kReducedMotion,L"Reduced motion");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING | (g.v3.idle==lynx::v3::IdleMode::Persistent?MF_CHECKED:0),
+                kIdlePersistent,L"Idle: Clock & Battery");
+    AppendMenuW(popup,MF_STRING | (g.v3.idle==lynx::v3::IdleMode::Adaptive?MF_CHECKED:0),
+                kIdleAdaptive,L"Idle: Minimal handle");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING | (g.v3.center==lynx::v3::CenterMode::Lens?MF_CHECKED:0),
+                kCenterLens,L"Center: Lens");
+    AppendMenuW(popup,MF_STRING | (g.v3.center==lynx::v3::CenterMode::Dot?MF_CHECKED:0),
+                kCenterDot,L"Center: Status dot");
+    AppendMenuW(popup,MF_STRING | (g.v3.center==lynx::v3::CenterMode::Day?MF_CHECKED:0),
+                kCenterDay,L"Center: Day");
+    AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(popup,MF_STRING | (effectiveMotion()==lynx::v3::Motion::Smooth?MF_CHECKED:0),
+                kMotionSmooth,L"Motion: Smooth");
+    AppendMenuW(popup,MF_STRING | (effectiveMotion()==lynx::v3::Motion::Snappy?MF_CHECKED:0),
+                kMotionSnappy,L"Motion: Snappy");
+    AppendMenuW(popup,MF_STRING | (effectiveMotion()==lynx::v3::Motion::Reduced?MF_CHECKED:0),
+                kReducedMotion,L"Motion: Reduced");
     AppendMenuW(popup,MF_SEPARATOR,0,nullptr);
     AppendMenuW(popup,MF_STRING,kQuit,L"Quit LYNX");
     HWND beforeMenuFocus = GetForegroundWindow();
@@ -824,10 +841,33 @@ void menu(HWND hwnd) {
             if (g.mediaProvider && g.mediaSnapshot.available && g.mediaSnapshot.canToggle)
                 g.mediaProvider->togglePlayPause();
             break;
+        case kIdlePersistent:
+        case kIdleAdaptive:
+            g.v3.idle=command==kIdleAdaptive ?
+                lynx::v3::IdleMode::Adaptive:lynx::v3::IdleMode::Persistent;
+            g.peekIdle=false;
+            if(!lynx::WindowsSettingsStore::saveIdleMode(g.v3.idle))
+                diagnostic("save idle policy failed",GetLastError());
+            break;
+        case kCenterLens:
+        case kCenterDot:
+        case kCenterDay:
+            g.v3.center=command==kCenterLens?lynx::v3::CenterMode::Lens:
+                command==kCenterDot?lynx::v3::CenterMode::Dot:
+                    lynx::v3::CenterMode::Day;
+            if(!lynx::WindowsSettingsStore::saveCenterMode(g.v3.center))
+                diagnostic("save center mode failed",GetLastError());
+            break;
+        case kMotionSmooth:
+        case kMotionSnappy:
         case kReducedMotion:
-            g.reduced=!g.reduced;
-            if (!lynx::WindowsSettingsStore::saveReducedMotion(g.reduced))
-                diagnostic("save motion preference failed",GetLastError());
+            g.v3.motion=command==kReducedMotion?lynx::v3::Motion::Reduced:
+                command==kMotionSnappy?lynx::v3::Motion::Snappy:
+                    lynx::v3::Motion::Smooth;
+            g.reduced=command==kReducedMotion;
+            if(!lynx::WindowsSettingsStore::saveMotion(g.v3.motion) ||
+               !lynx::WindowsSettingsStore::saveReducedMotion(g.reduced))
+                diagnostic("save motion preset failed",GetLastError());
             break;
         case kFullscreenDemo:
             g.hiddenByDemo=!g.hiddenByDemo;
