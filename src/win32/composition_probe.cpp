@@ -242,7 +242,7 @@ void finishMorph() {
     g.animating=false;
 }
 void animateMorph() {
-    if(g.animating)finishMorph(); // no queued stale animation completion
+    if(g.animating)finishMorph(); // cancel previous target before retarget
     g.expanded=!g.expanded;
     const auto desired=lynx::target(g.attached?lynx::Placement::Attached:
         lynx::Placement::Floating,g.expanded?lynx::View::Expanded:
@@ -279,16 +279,15 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(!g.animating)animateMorph();
             return 0;
         case WM_RBUTTONUP:
-            if(!g.animating) {
-                g.attached=!g.attached;
-                installStaticPath();
-            }
+            if(g.animating)finishMorph();
+            g.attached=!g.attached;
+            installStaticPath();
             return 0;
         case WM_HOTKEY:
             if(wp==kQuitHotkey) {DestroyWindow(hwnd);return 0;}
-            if(g.animating)return 0;
             if(wp==kExpandHotkey)animateMorph();
             if(wp==kPlacementHotkey) {
+                if(g.animating)finishMorph();
                 g.attached=!g.attached;installStaticPath();
             }
             return 0;
