@@ -5,7 +5,7 @@
 //
 // Controls: Ctrl+Alt+I expands/collapses; Ctrl+Alt+P switches placement;
 //           Ctrl+Alt+Q quits; left-click shape expands, right-click changes mode.
-//           During a compositor-driven morph, input is intentionally disabled.
+//           In-flight input retargets from the interpolated visual state.
 //
 // Official references:
 // https://learn.microsoft.com/windows/uwp/composition/using-the-visual-layer-with-win32
@@ -331,7 +331,7 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             return HTTRANSPARENT;
         }
         case WM_LBUTTONUP:
-            if(!g.animating)animateMorph();
+            animateMorph();
             return 0;
         case WM_RBUTTONUP:
             if(g.animating)interruptMorph();
