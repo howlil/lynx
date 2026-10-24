@@ -600,8 +600,12 @@ void setExpanded(bool wantExpanded) {
 void toggleExpanded() { setExpanded(presentationView()!=lynx::View::Expanded); }
 
 void openActivity(std::uint32_t id) {
-    if(g.activities.view()!=lynx::View::Expanded) setExpanded(true);
-    if(g.activities.select(id)) refresh();
+    if(presentationView()!=lynx::View::Expanded) setExpanded(true);
+    const auto old=g.activities.primary();
+    if(g.activities.select(id)) {
+        if(!old || old->id!=id)g.focusedAction=-1;
+        refresh();
+    }
 }
 void startFocus(int seconds) {
     const auto now=GetTickCount64();
