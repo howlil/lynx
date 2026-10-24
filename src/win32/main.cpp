@@ -1149,16 +1149,17 @@ LRESULT CALLBACK wndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 const auto actions=currentActions();
                 if(wp==VK_TAB && actions.count>0) {
                     const bool reverse=(GetKeyState(VK_SHIFT)&0x8000)!=0;
-                    g.focusedAction=reverse ?
-                        (g.focusedAction<0?actions.count-1:
-                         (g.focusedAction+actions.count-1)%actions.count) :
-                        (g.focusedAction+1)%actions.count;
-                    refresh();
-                    announceAccessibleFocus();
+                    const int next=actions.nextEnabled(g.focusedAction,reverse);
+                    if(next>=0) {
+                        g.focusedAction=next;
+                        refresh();
+                        announceAccessibleFocus();
+                    }
                     return 0;
                 }
                 if((wp==VK_RETURN || wp==VK_SPACE) && actions.count>0) {
-                    const int selected=g.focusedAction<0?0:g.focusedAction;
+                    const int selected=g.focusedAction<0?
+                        actions.nextEnabled(-1):g.focusedAction;
                     if(auto action=actions.at(selected)) {
                         if(action->enabled)invokeContextAction(action->action);
                         return 0;
