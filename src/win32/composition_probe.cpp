@@ -194,6 +194,20 @@ bool geometrySelfTest() {
             float area=0.f;
             if(FAILED(path->ComputeArea(nullptr,0.25f,&area)) || area < 1500.f)
                 return false;
+            // Verify the same flattened outline used by USER32 hit regions.
+            auto* regionSink=new(std::nothrow) lynx::D2DRegionSink();
+            if(!regionSink)return false;
+            const HRESULT hr=path->Simplify(
+                D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES,nullptr,0.5f,regionSink);
+            HRGN region=SUCCEEDED(hr)?regionSink->createRegion():nullptr;
+            regionSink->Release();
+            if(!region)return false;
+            const bool regionValid=PtInRegion(region,static_cast<int>(mid),
+                                              static_cast<int>(middleY)) &&
+                !PtInRegion(region,static_cast<int>(left-12.f),
+                                  static_cast<int>(middleY));
+            DeleteObject(region);
+            if(!regionValid)return false;
         }
     }
     return true;
